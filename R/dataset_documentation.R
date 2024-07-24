@@ -2,7 +2,7 @@
 #'
 #' Default management prescriptions by species, defined according current practices in Catalonia (NE Spain)
 #'
-#' A data frame with 27 species (or species groups) in rows and management parameters in columns (defined in \code{\link{defaultManagementArguments}})
+#' A data frame with 27 species (or species groups) in rows and management parameters in columns (defined in \code{\link[medfate]{defaultManagementArguments}})
 #' 
 #' @name defaultPrescriptionsBySpecies
 #' @aliases defaultPrescriptionsBySpecies
@@ -11,21 +11,21 @@
 #'   Mario Beltrán & Míriam Piqué. Forest Science and Technology Centre of Catalonia (CTFC)
 #' @keywords data
 #' 
-#' @seealso \code{\link{create_management_scenario}}, \code{\link{defaultManagementArguments}},
+#' @seealso \code{\link{create_management_scenario}}, \code{\link[medfate]{defaultManagementArguments}},
 #' \code{\link{fordyn_scenario}}
 NULL
 
 
 #' Example of watershed
 #' 
-#' An example of an object of \code{\link{sf}} with data for a small catchment of 66 ha (0.66 km2) in Catalonia. 
+#' An example of an object of \code{\link[sf]{sf}} with data for a small catchment of 66 ha (0.66 km2) in Catalonia. 
 #' Object \code{example_watershed_burnin} is the result of three years of burn-in period.
 #' 
 #' @name example_watershed
 #' @aliases example_watershed example_watershed_burnin
 #' @docType data
 #' @format 
-#' The data format is that of an object \code{\link{sf}} 
+#' The data format is that of an object \code{\link[sf]{sf}} 
 #' 
 #' @source
 #'   \itemize{
@@ -55,7 +55,7 @@ NULL
 #'  
 #' @name example_ifn
 #' @docType data
-#' @format The data format is that of an object \code{\link{sf}} 
+#' @format The data format is that of an object \code{\link[sf]{sf}} 
 #' 
 #' @source
 #'  \itemize{
