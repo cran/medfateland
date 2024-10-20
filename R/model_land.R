@@ -404,7 +404,6 @@
     if((y$land_cover_type[i]=="wildland") || (y$land_cover_type[i]=="agriculture")) {
       s <- localResults[[i]]$simulation_results
       DB <- s[["WaterBalance"]]
-      SB <- s[["Soil"]]
       MinTemperature[i] <- tminVec[i]
       MaxTemperature[i] <- tmaxVec[i]
       Snow[i] <- DB["Snow"]
@@ -498,14 +497,15 @@
   
   MinTemperature <- rep(NA, nX)
   MaxTemperature <- rep(NA, nX)
-  PET <- rep(NA, nX)
-  Precipitation <- rep(NA, nX)
-  Rain <- rep(NA, nX)
-  Snow <- rep(NA, nX)
-  Snowmelt <- rep(NA, nX)
-  NetRain <- rep(NA, nX)
-  SoilEvaporation <- rep(NA, nX)
-  Transpiration <- rep(NA, nX)
+  PET <- rep(0, nX)
+  Precipitation <- rep(0, nX)
+  Rain <- rep(0, nX)
+  Snow <- rep(0, nX)
+  Snowmelt <- rep(0, nX)
+  NetRain <- rep(0, nX)
+  SoilEvaporation <- rep(0, nX)
+  Transpiration <- rep(0, nX)
+  HerbTranspiration <- rep(0, nX)
   
   tminVec <- gridMeteo[["MinTemperature"]]
   tmaxVec <- gridMeteo[["MaxTemperature"]]
@@ -554,12 +554,10 @@
       localResults[[i]] = .f_landunit_day(XI[[i]], date = date, model = local_model)
     }
   }
-  
   for(i in 1:nX) {
     if((lct[i]=="wildland") || (lct[i]=="agriculture")) {
-      res <- localResults[[i]]
+      res <- localResults[[i]]$simulation_results
       DB <- res[["WaterBalance"]]
-      SB <- res[["Soil"]]
       MinTemperature[i] <- tminVec[i]
       MaxTemperature[i] <- tmaxVec[i]
       Snow[i] <- DB["Snow"]
@@ -572,6 +570,7 @@
       if(lct[i]=="wildland") {
         PL <- res[["Plants"]]
         Transpiration[i] <- sum(PL["Transpiration"])
+        HerbTranspiration[i] <- DB["HerbTranspiration"]
       } else {
         Transpiration[i] <- DB["Transpiration"]
       }
@@ -595,18 +594,17 @@
       }
     }
   }
-  
   # B. Calls SERGHEI
-  .callSergheiDay(lct, xList,
-                  gridMeteo, localResults,
-                  sf2cell, serghei_interface)
-  
+  # .callSergheiDay(lct, xList,
+  #                 gridMeteo, localResults,
+  #                 sf2cell, serghei_interface)
+
   waterBalance <- data.frame("MinTemperature" = MinTemperature,
                              "MaxTemperature" = MaxTemperature, 
                              "PET" = PET, "Rain" = Rain, "Snow" = Snow,
                              "Snowmelt" = Snowmelt, "NetRain" = NetRain, 
-                             "SoilEvaporation" = SoilEvaporation, "Transpiration" = Transpiration)
-  
+                             "SoilEvaporation" = SoilEvaporation, "Transpiration" = Transpiration,
+                             "HerbTranspiration" = HerbTranspiration)
   return(list("WatershedWaterBalance" = waterBalance,
               "LocalResults" = localResults))
 }
@@ -619,6 +617,9 @@
                          watershed_control = default_watershed_control(),
                          parallelize = parallelize, num_cores = num_cores, chunk_size = chunk_size,
                          progress = TRUE, header_footer = progress) {
+
+  # Disables clearing internal communication structures
+  local_control$clearCommunications = FALSE
 
   #land (local) model
   land_model <- match.arg(land_model, c("spwb_land", "growth_land", "fordyn_land"))
@@ -764,6 +765,16 @@
   y <- initialize_landscape(y, SpParams = SpParams, local_control = local_control, 
                             model = local_model, replace = FALSE, progress = progress)
 
+  # Add communication structures
+  for(i in 1:nCells) {
+    if((y$land_cover_type[i]=="wildland") && (!is.null(y$state[[i]]))) {
+      x_i <- y$state[[i]]
+      if(!("internalCommunication" %in% names(x_i))) {
+        x_i$internalCommunication <- vector("list",0)
+        y$state[[i]] <- x_i
+      }
+    }
+  }
   #Output matrices
   if(watershed_model =="tetis") {
     OutletExport_m3s <- matrix(0,nrow = nDays, ncol = length(outlets))
@@ -835,15 +846,16 @@
                  "SoilEvaporation", "Transpiration")
     varsMean <- c( "MinTemperature", "MaxTemperature")
     varsState <- c("SWE", "RWC", "SoilVol")
-    LandscapeBalance <- data.frame(dates = levels(date.factor)[1:nSummary],
-                                   Precipitation = rep(0, nSummary),
-                                   Snow = rep(0, nSummary),
-                                   Snowmelt = rep(0, nSummary),
-                                   Rain = rep(0, nSummary),
-                                   NetRain = rep(0, nSummary),
-                                   Interception = rep(0, nSummary),
-                                   SoilEvaporation = rep(0,nSummary),
-                                   Transpiration = rep(0, nSummary))
+    LandscapeBalance <- data.frame(dates = dates,
+                                   Precipitation = rep(0, nDays),
+                                   Snow = rep(0, nDays),
+                                   Snowmelt = rep(0, nDays),
+                                   Rain = rep(0, nDays),
+                                   NetRain = rep(0, nDays),
+                                   Interception = rep(0, nDays),
+                                   SoilEvaporation = rep(0,nDays),
+                                   Transpiration = rep(0, nDays),
+                                   HerbTranspiration = rep(0, nDays))
   }
   resultlist <- vector("list", nCells)
   summarylist <- vector("list", nCells)
@@ -874,7 +886,7 @@
       }
     }
   }
-  
+
   state_soil_summary_function <- function(object) {
     l = list(SWE=NA, RWC=NA, SoilVol=NA, WTD=NA)
     if(!is.null(object)) {
@@ -1005,7 +1017,7 @@
         else summarylist[[i]][ifactor,"DTA"] <- DTAday[i]/t.df[ifactor]
       }
     }
-    
+
     ## Store watershed runoff reaching each outlet (m3s)
     if(watershed_model=="tetis") {
       OutletExport_m3s[day,] <- (res_day$WatershedExport[outlets]/1e3)*patchsize/(3600*24)
@@ -1021,7 +1033,6 @@
     LandscapeBalance$HerbTranspiration[day] <- sum(res_day$HerbTranspiration, na.rm=T)/nCells
     LandscapeBalance$Interception[day] <- (sum(res_day$Rain, na.rm=T) - sum(res_day$NetRain, na.rm=T))/nCells
 
-    
     if(watershed_model=="tetis") {
       LandscapeBalance$DeepDrainage[day] <- sum(res_day$DeepDrainage, na.rm=T)/nCells
       LandscapeBalance$SaturationExcess[day] <- sum(res_day$SaturationExcess, na.rm=T)/nCells
@@ -1060,7 +1071,6 @@
   if(progress) cli::cli_progress_done()
   
 
-  
   #Average summaries
   LandscapeBalance$Precipitation <- LandscapeBalance$Rain + LandscapeBalance$Snow
   if(watershed_model=="tetis") {
@@ -1138,16 +1148,25 @@
     }
   }
   if(watershed_model=="serghei") {
+    .finishSerghei()
     if(header_footer) cli::cli_li("Water balance check not possible with SERGHEI")
   }
   
   sf <- sf::st_sf(geometry=sf::st_geometry(y))
   sf$state <- y$state
+  # Clear communication structures
+  for(i in 1:nCells) {
+    if((y$land_cover_type[i]=="wildland") && (!is.null(y$state[[i]]))) {
+      x_i <- sf$state[[i]]
+      x_i$internalCommunication <- vector("list",0)
+      sf$state[[i]] <- x_i
+    }
+  }
   if(watershed_model=="tetis") sf$aquifer <- y$aquifer
   sf$snowpack <- y$snowpack
   sf$summary <- summarylist
   sf$result <- resultlist
-  sf$outlet <- isOutlet
+  if(watershed_model=="tetis") sf$outlet <- isOutlet
   
   if(watershed_model=="tetis") {
     l <- list(watershed_control = watershed_control,
@@ -1788,6 +1807,9 @@ cell_neighbors<-function(sf, r) {
                              parallelize = parallelize, num_cores = num_cores, chunk_size = chunk_size,
                              progress = TRUE, header_footer = progress) {
   
+  # Disables clearing internal communication structures
+  local_control$clearCommunications = FALSE
+  
   #land (local) model
   land_model <- match.arg(land_model, c("spwb_land_day", "growth_land_day"))
   if(land_model == "spwb_land_day") local_model <- "spwb"
@@ -1846,7 +1868,7 @@ cell_neighbors<-function(sf, r) {
   } else {
     result_cell <- rep(FALSE, nrow(y))
   }
-  
+
   datesMeteo <- .get_dates_meteo(y, meteo)
   datesStarsList <- .get_dates_stars_list(meteo)
   
@@ -1862,6 +1884,7 @@ cell_neighbors<-function(sf, r) {
   nWater <- sum(y$land_cover_type %in% c("water"))
   # Do not allow results on cells that are wildland/agriculture
   result_cell[!isSoilCell] <- FALSE
+  
   
   # TETIS: Build/check neighbours
   if(watershed_model=="tetis") {
@@ -1926,6 +1949,13 @@ cell_neighbors<-function(sf, r) {
       else if(local_model=="growth") y$state[[i]] <- medfate::growthInput(f, s, SpParams, local_control_i)
       initialized_cells <- initialized_cells + 1
     } 
+    else if((y$land_cover_type[i] == "wildland") && (!is.null(y$state[[i]]))) {
+      x_i <- y$state[[i]]
+      if(!("internalCommunication" %in% names(x_i))) {
+        x_i$internalCommunication <- vector("list",0)
+        y$state[[i]] <- x_i
+      }
+    }
     else if((y$land_cover_type[i] == "agriculture") && (is.null(y$state[[i]]))) {
       s <- y$soil[[i]]
       cf <- y$crop_factor[i]
@@ -1979,16 +2009,27 @@ cell_neighbors<-function(sf, r) {
                                    latitude = latitude, elevation = y$elevation, slope = y$slope, aspect = y$aspect,
                                    parallelize = parallelize, num_cores = num_cores, chunk_size = chunk_size,
                                    progress = FALSE)
+    .finishSerghei()
   }
+  
   res <- sf::st_sf(geometry=sf::st_geometry(y))
   res$state = y$state
+  # Clear communication structures
+  for(i in 1:nCells) {
+    if((y$land_cover_type[i]=="wildland") && (!is.null(y$state[[i]]))) {
+      x_i <- res$state[[i]]
+      x_i$internalCommunication <- vector("list",0)
+      res$state[[i]] <- x_i
+    }
+  }
+  
   if(watershed_model=="tetis") res$aquifer <- y$aquifer
   res$snowpack <- y$snowpack
   res$result <- list(NULL)
   for(i in 1:nCells) {
     if(result_cell[i]) res$result[[i]] <- ws_day$LocalResults[[i]]$simulation_results
   }
-  res$outlet <- isOutlet
+  if(watershed_model=="tetis") res$outlet <- isOutlet
   wb <- ws_day$WatershedWaterBalance
   for(n in names(wb)) res[[n]] <- wb[[n]]
   return(sf::st_sf(tibble::as_tibble(res)))
@@ -2109,7 +2150,7 @@ cell_neighbors<-function(sf, r) {
 #' @name spwb_land_day
 #' @export
 spwb_land_day<-function(r, sf, SpParams, meteo= NULL, date = NULL,
-                        local_control = medfate::defaultControl(),
+                        local_control = medfate::defaultControl(soilDomains = "single"),
                         watershed_control = default_watershed_control(),
                         parallelize = FALSE, num_cores = detectCores()-1, chunk_size = NULL, 
                         progress = TRUE) {
@@ -2123,7 +2164,7 @@ spwb_land_day<-function(r, sf, SpParams, meteo= NULL, date = NULL,
 #' @rdname spwb_land_day
 #' @export
 growth_land_day<-function(r, sf, SpParams, meteo= NULL, date = NULL,
-                          local_control = medfate::defaultControl(),
+                          local_control = medfate::defaultControl(soilDomains = "single"),
                           watershed_control = default_watershed_control(),
                           parallelize = FALSE, num_cores = detectCores()-1, chunk_size = NULL, 
                           progress = TRUE) {
