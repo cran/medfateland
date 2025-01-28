@@ -53,7 +53,7 @@ fordyn_land(
   dispersal_control = default_dispersal_control(),
   management_function = NULL,
   parallelize = FALSE,
-  num_cores = detectCores() - 1,
+  num_cores = parallel::detectCores() - 1,
   chunk_size = NULL,
   progress = TRUE
 )
@@ -188,6 +188,13 @@ In function \code{fordyn_land} the \code{\link[sf]{sf}} object contains addition
 \item{\code{dead_shrub_table}: A list of data frames for each simulated stand, containing the dead shrub at each time step.}
 \item{\code{cut_tree_table}: A list of data frames for each simulated stand, containing the cut trees at each time step.}
 \item{\code{cut_shrub_table}: A list of data frames for each simulated stand, containing the cut shrub at each time step.}
+}
+}
+\item{\code{overland_routing}: A list with three items describing overland routing parameters:
+\itemize{
+\item{\code{waterOrder}: A vector with the cell's processing order for overland routing (based on elevation).}
+\item{\code{queenNeigh}: A list where, for each cell, a vector gives the identity of neighbours (up to eight).}
+\item{\code{waterQ}: A list where, for each cell, a vector gives the proportion of overland flow to each neighbour.}
 }
 }
 \item{\code{watershed_balance}: A data frame with as many rows as days and where columns are components of the water balance at the watershed level (i.e., rain, snow, interception, infiltration, soil evaporation, plant transpiration, ...).}
