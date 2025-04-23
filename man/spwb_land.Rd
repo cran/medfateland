@@ -4,7 +4,6 @@
 \alias{spwb_land}
 \alias{growth_land}
 \alias{fordyn_land}
-\alias{cell_neighbors}
 \alias{summary.spwb_land}
 \alias{summary.growth_land}
 \title{Watershed simulations}
@@ -16,12 +15,12 @@ spwb_land(
   meteo = NULL,
   dates = NULL,
   CO2ByYear = numeric(0),
+  summary_blocks = NULL,
   summary_frequency = "years",
   local_control = defaultControl(soilDomains = "single"),
   watershed_control = default_watershed_control(),
   parallelize = FALSE,
-  num_cores = detectCores() - 1,
-  chunk_size = NULL,
+  num_cores = parallel::detectCores() - 1,
   progress = TRUE
 )
 
@@ -32,12 +31,12 @@ growth_land(
   meteo = NULL,
   dates = NULL,
   CO2ByYear = numeric(0),
+  summary_blocks = NULL,
   summary_frequency = "years",
   local_control = medfate::defaultControl(soilDomains = "single"),
   watershed_control = default_watershed_control(),
   parallelize = FALSE,
-  num_cores = detectCores() - 1,
-  chunk_size = NULL,
+  num_cores = parallel::detectCores() - 1,
   progress = TRUE
 )
 
@@ -48,17 +47,16 @@ fordyn_land(
   meteo = NULL,
   dates = NULL,
   CO2ByYear = numeric(0),
+  summary_blocks = NULL,
+  summary_frequency = "years",
   local_control = medfate::defaultControl(soilDomains = "single"),
   watershed_control = default_watershed_control(),
   dispersal_control = default_dispersal_control(),
   management_function = NULL,
   parallelize = FALSE,
   num_cores = parallel::detectCores() - 1,
-  chunk_size = NULL,
   progress = TRUE
 )
-
-cell_neighbors(sf, r)
 
 \method{summary}{spwb_land}(object, ...)
 
@@ -94,9 +92,11 @@ When using TETIS watershed model, the following columns are OPTIONAL:
 \itemize{
 \item{\code{aquifer}: A numeric vector with the water content of the aquifer in each cell (in mm). If missing, it will be initialized to zero.}
 \item{\code{deep_aquifer_loss}: A numeric vector with the maximum daily loss to a deeper aquifer (in mm·day-1). If missing all cells take their value from \code{deep_aquifer_loss} in \code{\link{default_watershed_control}}}
+\item{\code{channel}: A logical (or binary) vector indicating overland channel routing.}
+\item{\code{outlet_backlog}: A list vector indicating channel backlog of outlet cells from a previous simulation.}
 }}
 
-\item{SpParams}{A data frame with species parameters (see \code{\link[medfate]{SpParamsMED}}).}
+\item{SpParams}{A data frame with species parameters (see \code{\link[medfate]{SpParamsMED}}). IMPORTANT: If \code{sf} has been already initialized, this parameter has no effect.}
 
 \item{meteo}{Input meteorological data (see \code{\link{spwb_spatial}} and details).}
 
@@ -104,20 +104,20 @@ When using TETIS watershed model, the following columns are OPTIONAL:
 
 \item{CO2ByYear}{A named numeric vector with years as names and atmospheric CO2 concentration (in ppm) as values. Used to specify annual changes in CO2 concentration along the simulation (as an alternative to specifying daily values in \code{meteo}).}
 
-\item{summary_frequency}{Frequency in which cell summary will be produced (e.g. "years", "months", ...) (see \code{\link{cut.Date}}).
-In \code{fordyn_land} summaries are always produced at monthly resolution.}
+\item{summary_blocks}{A character vector with variable blocks for cell summaries (or \code{NULL} to retain only basic summaries). Accepted summary blocks for \code{spwb_land} are "WaterBalance" and "Stand". For \code{growth_land} and \code{fordyn_land}, "CarbonBalance" and "BiomassBalance" are also accepted.}
+
+\item{summary_frequency}{Frequency in which cell summary will be produced (e.g. "years", "months", "weeks", ...) (see \code{\link{cut.Date}}).
+In \code{fordyn_land} summary frequency can only be "months" or "years".}
 
 \item{local_control}{A list of control parameters (see \code{\link[medfate]{defaultControl}}) for function \code{\link[medfate]{spwb_day}} or \code{\link[medfate]{growth_day}}. By default,
-parameter \code{soilDomains} is set to \code{"single"}, meaning a single-domain Richards model.}
+parameter \code{soilDomains} is set to \code{"single"}, meaning a single-domain Richards model. IMPORTANT: If \code{sf} has been already initialized, this parameter has no effect.}
 
 \item{watershed_control}{A list of watershed control parameters (see \code{\link{default_watershed_control}}). Importantly, the sub-model used
 for lateral water flows - either \enc{Francés}{Frances} et al. (2007) or \enc{Caviedes-Voullième}{Caviedes-Voullieme} et al. (2023) - is specified there.}
 
-\item{parallelize}{Boolean flag to try parallelization (see details).}
+\item{parallelize}{Boolean flag to try parallelization (only works with subwatersheds, see details).}
 
 \item{num_cores}{Integer with the number of cores to be used for parallel computation (by default it will use all clusters minus one).}
-
-\item{chunk_size}{Integer indicating the size of chunks to be sent to different processes (by default, the number of spatial elements divided by the number of cores).}
 
 \item{progress}{Boolean flag to display progress information for simulations.}
 
@@ -141,33 +141,13 @@ with the following columns:
 \item{\code{state}: A list of model input objects for each simulated stand.}
 \item{\code{aquifer}: A numeric vector with the water volume in the aquifer of each cell.}
 \item{\code{snowpack}: A numeric vector with the snowpack water equivalent volume of each cell.}
-\item{\code{summary}: A list of cell summaries, containing the following variables:
+\item{\code{summary}: A list of cell summaries containing at least the following variables (additional variables are summarized using \code{summary_blocks}):
 \itemize{
 \item{\code{MinTemperature}: Minimum temperature (degrees Celsius).}
 \item{\code{MaxTemperature}: Maximum temperature (degrees Celsius).}
 \item{\code{PET}: Potential evapotranspiration (in mm).}
 \item{\code{Rain}: Rainfall (in mm).}
 \item{\code{Snow}: Snowfall (in mm).}
-\item{\code{Snowmelt}: Snow melt (in mm).}
-\item{\code{Interception}: Rainfall interception (in mm).}
-\item{\code{NetRain}: Net rainfall, i.e. throughfall, (in mm).}
-\item{\code{Infiltration}: The amount of water infiltrating into the soil (in mm).}
-\item{\code{InfiltrationExcess}: The amount of water exceeding the soil infiltration capacity (in mm).}
-\item{\code{SaturationExcess}: The amount of water that reaches the soil surface because of soil saturation (in mm).}
-\item{\code{Runon}: The amount of water reaching the cell via surface runon (in mm).}
-\item{\code{Runoff}: The amount of water exported from the cell via surface runoff (in mm).}
-\item{\code{DeepDrainage}: The amount of water draining from soil to the aquifer via deep drainage (in mm).}
-\item{\code{CapillarityRise}: Water entering the soil via capillarity rise (mm) from the water table.}
-\item{\code{SoilEvaporation}: Bare soil evaporation (in mm).}
-\item{\code{Transpiration}: Woody plant transpiration (in mm).}
-\item{\code{HerbTranspiration}: Herbaceous transpiration (in mm).}
-\item{\code{InterflowInput}: The amount of water that reaches the soil of the cell from adjacent cells via subsurface flow (in mm).}
-\item{\code{InterflowOutput}: The amount of water that leaves the soil of the cell towards adjacent cells via subsurface flow (in mm).}
-\item{\code{InterflowBalance}: The balance of water circulating via subsurface flow (in mm).}
-\item{\code{BaseflowInput}: The amount of water that reaches the aquifer of the cell from adjacent cells via groundwater flow (in mm).}
-\item{\code{BaseflowOutput}: The amount of water that leaves the aquifer of the cell towards adjacent cells via groundwater flow (in mm).}
-\item{\code{BaseflowBalance}: The balance of water circulating via groundwater flow (in mm).}
-\item{\code{AquiferExfiltration}: The amount of water of the cell that generates surface runoff due to the aquifer reaching the soil surface (in mm).}
 \item{\code{SWE}: Snow water equivalent (in mm) of the snowpack.}
 \item{\code{RWC}: Soil relative water content with respect to field capacity (in percent).}
 \item{\code{SoilVol}: Soil water volume integrated across vertical layers (in mm).}
@@ -177,6 +157,7 @@ with the following columns:
 }
 \item{\code{result}: A list of cell detailed results (only for those indicated in the input), with contents depending on the local model.}
 \item{\code{outlet}: A logical vector indicating outlet cells.}
+\item{\code{outlet_backlog}: A list vector indicating channel backlog of outlet cells (for subsequent simulations).}
 }
 In function \code{fordyn_land} the \code{\link[sf]{sf}} object contains additional columns:
 \itemize{
@@ -190,17 +171,11 @@ In function \code{fordyn_land} the \code{\link[sf]{sf}} object contains addition
 \item{\code{cut_shrub_table}: A list of data frames for each simulated stand, containing the cut shrub at each time step.}
 }
 }
-\item{\code{overland_routing}: A list with three items describing overland routing parameters:
-\itemize{
-\item{\code{waterOrder}: A vector with the cell's processing order for overland routing (based on elevation).}
-\item{\code{queenNeigh}: A list where, for each cell, a vector gives the identity of neighbours (up to eight).}
-\item{\code{waterQ}: A list where, for each cell, a vector gives the proportion of overland flow to each neighbour.}
-}
-}
-\item{\code{watershed_balance}: A data frame with as many rows as days and where columns are components of the water balance at the watershed level (i.e., rain, snow, interception, infiltration, soil evaporation, plant transpiration, ...).}
-\item{\code{watershed_soil_balance}: A data frame with as many rows as days and where columns are components of the water balance at the watershed level restricted to those cells with a soil definition.}
-\item{\code{outlet_export_m3s}: A matrix with daily values of runoff (in m3/s) reaching each of the outlet cells of the landscape. Each outlet drains its own subset of cells, so the
-overall watershed export corresponds to the sum of row values.}
+\item{\code{watershed_balance}: A data frame with as many rows as days and where columns are (spatially-averaged) components of the water balance at the watershed level (i.e., rain, snow, interception, infiltration, soil evaporation, plant transpiration, ...).}
+\item{\code{watershed_soil_balance}: A data frame with as many rows as days and where columns are (spatially-averaged) components of the water balance at the watershed level restricted to those cells with a soil definition.}
+\item{\code{channel_export_m3s}: A matrix with daily values of runoff (in m3/s) reaching each of the channel cells of the landscape (useful for channel processing with an external model).}
+\item{\code{outlet_export_m3s}: A matrix with daily values of runoff (in m3/s) reaching each of the outlet cells of the landscape. Each outlet drains its own subset of cells (sometimes including channel routing), so the
+daily overall watershed export corresponds to the sum of row values.}
 }
 }
 \description{
@@ -215,7 +190,8 @@ and resprouting.}
 }
 }
 \details{
-The default \code{soilDomains = "single"} means that vertical bulk soil flows are simulated using a single permeability domain with Richards equation.
+IMPORTANT: Simulation function will normally call the initialization of state variables via an internal call to \code{\link{initialize_landscape}}, using parameters \code{local_control} and \code{SpParams} in this call. The default \code{soilDomains = "single"} means that vertical bulk soil flows are simulated using a single permeability domain with Richards equation.
+However, if object \code{sf} has been previously initialized, then the control parameters of this previous initialization will remain the same. In other words, parameters \code{local_control} and \code{SpParams} will have no effect in the call to the simulation routines if the \code{sf} has been previously initialized.
 
 Two sub-models are available for lateral water transfer processes (overland flow, sub-surface flow, etc.), either "TETIS"
 (similar to \enc{Francés}{Frances} et al. 2007) or "SERGHEI" (\enc{Caviedes-Voullième}{Caviedes-Voullieme} et al. 2023).
@@ -226,9 +202,7 @@ distributed hydrological model.
 When running \code{fordyn_land}, the input 'sf' object has to be in a Universal Transverse Mercator (UTM) coordinate system (or any other projection using meters as length unit)
 for appropriate behavior of dispersal sub-model.
 
-Parallel computation is only recommended for watersheds with large number of grid cells (e.g. > 10,000 when using \code{transpirationMode = "granier"}).
-In watershed with a small number of cells, parallel computation can result in larger processing times than sequential computation, due
-to the communication overload.
+Due to the large communication overload, parallel computation is only allowed for TETIS in combination with definition of subwatersheds (see flag of TETIS parameters in \code{\link{default_watershed_control}}).
 
 When dealing with large data sets, weather data included in the 'sf' object will likely be very data hungry. In those cases, it is
 recommended to resort on weather interpolation (see \code{\link{spwb_spatial}}). Weather interpolation can be done using a coarser resolution
@@ -295,7 +269,8 @@ res_simplified <- spwb_land(r, example_simplified, SpParamsMED, examplemeteo,
 \enc{Caviedes-Voullième}{Caviedes-Voullieme}, D., \enc{Morales-Hernández}{Morales-Hernandez}, M., Norman, M.R. & Ogzen-Xian, I. (2023). SERGHEI (SERGHEI-SWE) v1.0: a performance-portable high-performance parallel-computing shallow-water solver for hydrology and environmental hydraulics. Geoscientific Model Development, 16, 977-1008.
 }
 \seealso{
-\code{\link{default_watershed_control}}, \code{\link{initialize_landscape}}, \code{\link{spwb_land_day}}, \code{\link[medfate]{spwb_day}},  \code{\link[medfate]{growth_day}},
+\code{\link{default_watershed_control}}, \code{\link{initialize_landscape}}, \code{\link{overland_routing}},
+\code{\link{spwb_land_day}}, \code{\link[medfate]{spwb_day}},  \code{\link[medfate]{growth_day}},
 \code{\link{spwb_spatial}}, \code{\link{fordyn_spatial}}, \code{\link{dispersal}}
 }
 \author{

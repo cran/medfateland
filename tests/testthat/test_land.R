@@ -8,6 +8,9 @@ r <-terra::rast(xmin = 401380, ymin = 4671820, xmax = 402880, ymax = 4672620,
  
 example_watershed$crop_factor = NA
 example_watershed$crop_factor[example_watershed$land_cover_type=="agriculture"] = 0.75
+example_watershed$result_cell <- FALSE
+example_watershed$result_cell[c(3,6,9)] <- TRUE
+
 yws_swpb <- initialize_landscape(example_watershed, SpParams = SpParamsMED, local_control = defaultControl(),
                                  model = "spwb", progress = FALSE)
 yws_growth <- initialize_landscape(example_watershed, SpParams = SpParamsMED, local_control = defaultControl(),
@@ -24,7 +27,9 @@ interpolator <- meteoland::with_meteo(meteoland_meteo_example, verbose = FALSE) 
 data("SpParamsMED")
 dates = seq(as.Date("2001-03-01"), as.Date("2001-03-01"), by="day")
 
-
+test_that("Overland routing can be estimated",{
+  expect_s3_class(overland_routing(r, yws_swpb[1:10,]), "sf")
+})
 test_that("Can simulate three days over landscape",{
   expect_s3_class(spwb_land(r, yws_swpb[1:10,], meteo = examplemeteo, dates = dates, summary_frequency = "month", 
                            SpParams = SpParamsMED, progress = FALSE), "spwb_land")

@@ -51,6 +51,7 @@
   if("bedrock_porosity" %in% names(obj)) vars <- c(vars, "Bedrock porosity" = "bedrock_porosity") 
   if("bedrock_conductivity" %in% names(obj)) vars <- c(vars, "Bedrock conductivity (m/day)" = "bedrock_conductivity") 
   if("snowpack" %in% names(obj)) vars <- c(vars, "Snowpack water equivalent (mm)" = "snowpack") 
+  if("channel" %in% names(obj)) vars <- c(vars, "Channel" = "channel") 
   if("aquifer" %in% names(obj)) {
     vars <- c(vars, "Aquifer volume (mm)" = "aquifer") 
     if("bedrock_porosity" %in% names(obj)) {
@@ -64,28 +65,30 @@
 }
 .getLandscapeWatershedVar<-function(obj, variable) {
   if(variable =="depth_to_bedrock") {
-    varplot = obj$depth_to_bedrock/1000.0  # in m
+    varplot <- obj$depth_to_bedrock/1000.0  # in m
   } else if(variable =="bedrock_porosity") {
-    varplot = obj$bedrock_porosity
+    varplot <- obj$bedrock_porosity
   } else if(variable =="bedrock_conductivity") {
-    varplot = obj$bedrock_conductivity
+    varplot <- obj$bedrock_conductivity
   } else if(variable =="aquifer") {
-    varplot = obj$aquifer
+    varplot <- obj$aquifer
   } else if(variable =="aquifer_elevation") {
-    DTB = obj$depth_to_bedrock
-    aquifer = obj$aquifer
-    RockPorosity = obj$bedrock_porosity
-    elevation = obj$elevation
-    varplot = elevation - (DTB/1000.0) + (aquifer/RockPorosity)/1000.0 # in m
-    varplot[RockPorosity==0.0] = elevation[RockPorosity==0.0]
+    DTB <- obj$depth_to_bedrock
+    aquifer <- obj$aquifer
+    RockPorosity <- obj$bedrock_porosity
+    elevation <- obj$elevation
+    varplot <- elevation - (DTB/1000.0) + (aquifer/RockPorosity)/1000.0 # in m
+    varplot[RockPorosity==0.0] <- elevation[RockPorosity==0.0]
   } else if(variable=="snowpack") {
-    varplot = obj$snowpack
+    varplot <- obj$snowpack
+  } else if(variable=="channel") {
+    varplot <- as.numeric(obj$channel)
   } else if(variable =="depth_to_aquifer") {
-    DTB = obj$depth_to_bedrock
-    aquifer = obj$aquifer
-    RockPorosity = obj$bedrock_porosity
-    varplot = (DTB/1000.0) - (aquifer/RockPorosity)/1000.0
-    varplot[RockPorosity==0.0] = DTB[RockPorosity==0.0]/1000
+    DTB <- obj$depth_to_bedrock
+    aquifer <- obj$aquifer
+    RockPorosity <- obj$bedrock_porosity
+    varplot <- (DTB/1000.0) - (aquifer/RockPorosity)/1000.0
+    varplot[RockPorosity==0.0] <- DTB[RockPorosity==0.0]/1000
   }
   return(varplot)
 }

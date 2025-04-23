@@ -25,47 +25,6 @@
   }
   return(soil_column)
 }
-.waterQFun <-function(queenNeigh, coords, elevation) {
-  Q = vector("list", length(queenNeigh))
-  qfun<-function(xi, yi, zi, X, Y, Z) {
-    n = length(X)
-    Li = sqrt((X-xi)^2+(Y-yi)^2+(Z-zi)^2)
-    dZ = zi-Z #dif. in elevation
-    dZLi = dZ/Li 
-    dZLi[dZ<=0] = 0 #Set to zero for neighbour cells at higher or equal elevation
-    if(sum(dZLi)>0) return(dZLi/sum(dZLi))
-    return(rep(0, n)) #In a flat area no discharge will be applied
-  }
-  for(i in 1:length(queenNeigh)) {
-    wne = queenNeigh[[i]]
-    Q[[i]] = qfun(xi = coords[i,1], yi=coords[i,2],zi = elevation[i],
-                  X = coords[wne,1], Y = coords[wne,2], Z = elevation[wne])
-  }  
-  return(Q)
-}
-.neighFun<-function(r, sf2cell, cell2sf) {
-  ncol <- dim(r)[2]
-  nrow <- dim(r)[1]
-  queenNeigh <- vector("list", length(sf2cell))
-  rowcol <- terra::rowColFromCell(r, sf2cell)
-  m2 <- matrix(c(-1,-1,
-                 0,-1,
-                 1,-1,
-                 -1,0,
-                 1,0,
-                 -1,1,
-                 0,1,
-                 1,1), nrow=8, ncol=2, byrow = TRUE)
-  for(i in 1:length(sf2cell)) {
-    m1 <-matrix(rep(rowcol[i,],8),
-                nrow = 8, ncol=2, byrow = TRUE) 
-    m <- m1 + m2
-    m <- m[m[,1]>0 & m[,1]<=nrow & m[,2]>0 & m[,2]<=ncol, ]
-    v <- cell2sf[terra::cellFromRowCol(r, m[,1], m[,2])]
-    queenNeigh[[i]] <- sort(v[!is.na(v)])
-  }
-  return(queenNeigh)
-}
 
 
 
@@ -292,15 +251,25 @@
                               internalCommunication,
                               local_model,
                               y,
-                              waterOrder, queenNeigh, waterQ,
+                              sf_routing,
                               watershed_control,
                               date,
                               gridMeteo,
                               latitude, 
-                              parallelize = FALSE, num_cores = detectCores()-1, chunk_size = NULL,
+                              standSummary = FALSE, carbonBalanceSummary = FALSE, biomassBalanceSummary = FALSE,
                               patchsize = NA, progress = TRUE) {
 
-  nX = nrow(y)
+  nX <- nrow(y)
+  
+  waterOrder <- sf_routing$waterOrder
+  queenNeigh <- sf_routing$queenNeigh
+  waterQ <- sf_routing$waterQ
+  isChannel <- sf_routing$channel
+  isOutlet <- sf_routing$outlet
+  target_outlet <- sf_routing$target_outlet
+  distance_to_outlet <- sf_routing$distance_to_outlet
+  outlet_backlog <- sf_routing$outlet_backlog
+  
   # Reset from previous days
   .resetWaterBalanceDayOutput(output[["WatershedWaterBalance"]])
   
@@ -340,7 +309,7 @@
   .tetisSimulationNonSoilCells(output[["WatershedWaterBalance"]],
                                y,
                                tminVec, tmaxVec, precVec, radVec,
-                               waterOrder, queenNeigh, waterQ,
+                               waterOrder, queenNeigh, waterQ, isChannel,
                                watershed_control)
   
   # B3. Simulation of soil cells
@@ -379,22 +348,13 @@
                       waterTableDepth = wtd) # // New depth to aquifer (mm)
     }
   }
-  if(parallelize) {
-    if(is.null(chunk_size)) chunk_size <- floor(nX/num_cores)
-    cl<-parallel::makeCluster(num_cores)
-    localResults <- parallel::parLapplyLB(cl, XI, .f_landunit_day, 
-                                          date = date, model = local_model,
-                                          internalCommunication = internalCommunication,
-                                          chunk.size = chunk_size)
-    parallel::stopCluster(cl)
-    .copyStateFromResults(y, localResults)
-  } else {
-    localResults <- vector("list", nX)
-    for(i in 1:nX) {
-      if(y$land_cover_type[i] %in% c("wildland", "agriculture")) {
-        localResults[[i]] <- .fcpp_landunit_day(XI[[i]], date = date, model = local_model, 
-                                                internalCommunication = internalCommunication)
-      }
+  localResults <- vector("list", nX)
+  for(i in 1:nX) {
+    if(y$land_cover_type[i] %in% c("wildland", "agriculture")) {
+      localResults[[i]] <- .fcpp_landunit_day(XI[[i]], date = date, model = local_model, 
+                                              internalCommunication = internalCommunication,
+                                              standSummary = standSummary, carbonBalanceSummary = carbonBalanceSummary, 
+                                              biomassBalanceSummary = biomassBalanceSummary)
     }
   }
   .copySnowpackFromSoil(y)
@@ -404,9 +364,9 @@
   .tetisCopySoilResultsToOutput(y, localResults, output,
                                 tminVec, tmaxVec)
 
-  #C2. Overland surface runoff from soil cells diverted to outlets
+  #C2. Overland surface runoff from cells diverted to outlets or channel
   .tetisOverlandFlows(output[["WatershedWaterBalance"]],
-                      waterOrder, queenNeigh, waterQ)
+                      waterOrder, queenNeigh, waterQ, isChannel)
   
   
   #D. Applies capillarity rise, deep drainage to aquifer
@@ -430,7 +390,6 @@
                                 date,
                                 gridMeteo,
                                 latitude, elevation, slope, aspect,
-                                parallelize = FALSE, num_cores = detectCores()-1, chunk_size = NULL,
                                 progress = TRUE) {
   nX <- length(xList)
   
@@ -480,18 +439,9 @@
   }
   
   #A. Vertical and surface fluxes
-  if(parallelize) {
-    if(is.null(chunk_size)) chunk_size <- floor(nX/num_cores)
-    cl<-parallel::makeCluster(num_cores)
-    localResults <- parallel::parLapplyLB(cl, XI, .f_landunit_day, 
-                                          date = date, model = local_model,
-                                          chunk.size = chunk_size)
-    parallel::stopCluster(cl)
-  } else {
-    localResults <- vector("list", nX)
-    for(i in 1:nX) {
-      localResults[[i]] = .f_landunit_day(XI[[i]], date = date, model = local_model)
-    }
+  localResults <- vector("list", nX)
+  for(i in 1:nX) {
+    localResults[[i]] = .f_landunit_day(XI[[i]], date = date, model = local_model)
   }
   for(i in 1:nX) {
     if((lct[i]=="wildland") || (lct[i]=="agriculture")) {
@@ -548,203 +498,140 @@
               "LocalResults" = localResults))
 }
 
-.simulate_land<-function(land_model = "spwb_land", 
-                         r, y, SpParams, meteo, dates = NULL,
-                         CO2ByYear = numeric(0), 
-                         summary_frequency = "years",
-                         local_control = medfate::defaultControl(),
-                         watershed_control = default_watershed_control(),
-                         parallelize = parallelize, num_cores = num_cores, chunk_size = chunk_size,
-                         progress = TRUE, header_footer = progress) {
+.vars_stand <- function(type = "all") {
+  varsStand <- c("LAI", "LAIherb", "LAIlive", "LAIexpanded", "LAIdead", "Cm", "LgroundPAR", "LgroundSWR")
+  if(type %in% c("mean", "all")) return(varsStand)
+  return(c())
+}
+.vars_waterbalance <- function(type = "all"){
+  varsWaterBalance <- c("Snowmelt", "Interception", "NetRain",  
+                        "Infiltration", "InfiltrationExcess",  "SaturationExcess", "Runon", "Runoff", 
+                        "DeepDrainage", "CapillarityRise", "DeepAquiferLoss",
+                        "SoilEvaporation", "Transpiration", "HerbTranspiration",
+                        "InterflowInput", "InterflowOutput", "InterflowBalance", "BaseflowInput", "BaseflowOutput", "BaseflowBalance", "AquiferExfiltration")
+  if(type %in% c("sum", "all")) return(varsWaterBalance)
+  return(c())
+}
+.vars_carbonbalance <- function(type = "all") {
+  varsCarbonBalance <- c("GrossPrimaryProduction","MaintenanceRespiration","SynthesisRespiration","NetPrimaryProduction")
+  if(type %in% c("sum", "all")) return(varsCarbonBalance)
+  return(c())
+}
+.vars_biomassbalance <- function(type = "all") {
+  varsBiomassBalance <- c("StructuralBalance", "LabileBalance", "PlantBalance", "MortalityLoss", "CohortBalance")
+  if(type %in% c("sum", "all")) return(varsBiomassBalance)
+  return(c())
+}
+.vars_summary <- function(type = "all",
+                          standSummary, waterBalanceSummary, carbonBalanceSummary, biomassBalanceSummary) {
+  if(type=="state") {
+    return(c("SWE", "RWC", "SoilVol","WTD"))
+  } else if(type=="all") {
+    vars <- c("MinTemperature","MaxTemperature","PET", "Rain", "Snow", "SWE", "RWC", "SoilVol","WTD","DTA")
+  } else if(type=="sum") {
+    vars <- c("PET","Rain", "Snow")
+  } else if(type=="mean") {
+    vars <- c("MinTemperature", "MaxTemperature")
+  }
+  if(waterBalanceSummary) vars <- c(vars, .vars_waterbalance(type))
+  if(standSummary) vars <- c(vars, .vars_stand(type))
+  if(carbonBalanceSummary) vars <- c(vars, .vars_carbonbalance(type))
+  if(biomassBalanceSummary) vars <- c(vars, .vars_biomassbalance(type))
+  return(vars)
+}
 
+.aggregate_summary_to_annual<-function(m, varsSum, varsMean, varsState) {
+  month_weights <- c(31,28,31,30,31,30,31,31,30,31,30,31)[1:nrow(m)]
+  month_weights <- month_weights/sum(month_weights)
+  coln <- colnames(m)
+  rown <- rownames(m)
+  year_string <- paste0(substr(rown[1], 1,4),"-01-01")
+  m_year <- matrix(NA, nrow=1, ncol = ncol(m), dimnames = list(year_string, coln))
+  for(j in 1:ncol(m)) {
+    if(coln[j] %in% varsSum) {
+      m_year[1,j] <- sum(m[,j], na.rm=TRUE)
+    } else if(coln[j] %in% varsMean) {
+      m_year[1,j] <- sum(m[,j]*month_weights, na.rm=TRUE)
+    } else if((coln[j] %in% varsState) || (coln[j] == "DTA")) {
+      m_year[1,j] <- sum(m[,j]*month_weights, na.rm=TRUE)
+    } else {
+      stop(paste0("variable name ", coln[j]," not found in summary variables for sums or means"))
+    }
+  }
+  return(m_year)
+}
 
-  #land (local) model
-  land_model <- match.arg(land_model, c("spwb_land", "growth_land", "fordyn_land"))
-  if(land_model == "spwb_land") local_model <- "spwb"
-  else if(land_model=="growth_land") local_model <- "growth"
-  else if(land_model=="fordyn_land") local_model <- "growth"
+.simulate_land_inner <- function(local_model = "spwb", 
+                                 r, y, sf_routing, 
+                                 meteo, dates,
+                                 CO2ByYear = numeric(0), 
+                                 summary_frequency = "years",
+                                 summary_blocks = character(0),
+                                 watershed_control = default_watershed_control(),
+                                 progress = TRUE, header_footer = progress) {
   
-  #watershed model
-  watershed_model <- watershed_control$watershed_model
-  watershed_model <- match.arg(watershed_model, c("tetis", "serghei"))
+  nCells <- nrow(y)
+  isSoilCell <- y$land_cover_type %in% c("wildland", "agriculture")
+  isAgricultureCell <- y$land_cover_type %in% c("agriculture")
+  isWildlandCell <- y$land_cover_type %in% c("wildland")
+  nSoil <- sum(isSoilCell)
   
-  #check input
-  
-  if(!inherits(y, "sf")) cli::cli_abort("'sf' has to be of class 'sf'.")
-  
-  if(header_footer) cli::cli_progress_step(paste0("Checking raster topology"))
-  if(!inherits(r, "SpatRaster")) cli::cli_abort("'r' has to be of class 'SpatRaster'.")
-  if(sf::st_crs(y)!=sf::st_crs(r)) cli::cli_abort("'sf' and 'r' need to have the same CRS.")
-  sf_coords <- sf::st_coordinates(y)
-  sf2cell <- terra::cellFromXY(r, sf_coords)
-  if(any(is.na(sf2cell))) cli::cli_abort("Some coordinates are outside the raster definition.")
-  if(length(sf2cell)!=length(unique(sf2cell))) cli::cli_abort("Only one element in 'sf' is allowed per cell in 'r'.")
-  nrastercells <- prod(dim(r)[1:2])
-  cell2sf <- rep(NA, nrastercells)
-  for(i in 1:length(sf2cell)) cell2sf[sf2cell[i]] <- i
-  
-  if(header_footer) cli::cli_progress_step(paste0("Checking 'sf' data columns"))
-  .check_sf_input(y)
-  if(!is.null(dates)) if(!inherits(dates, "Date")) cli::cli_abort("'dates' has to be of class 'Date'.")
-
   represented_area_m2 <- as.vector(terra::values(terra::cellSize(r)))
   patchsize <- mean(represented_area_m2, na.rm=TRUE)
-
-  if(!("snowpack" %in% names(y))) {
-    cli::cli_alert_info("Column 'snowpack' was missing in 'sf'. Initializing empty snowpack.")
-    y$snowpack <- rep(0, nrow(y))
-  }
-  ## TETIS: Check additional elements
-  if(watershed_model == "tetis") {
-    if(!("depth_to_bedrock" %in% names(y))) cli::cli_abort("'depth_to_bedrock' has to be defined in 'sf'.")
-    if(!("bedrock_conductivity" %in% names(y))) cli::cli_abort("'bedrock_conductivity' has to be defined in 'sf'.")
-    if(!("bedrock_porosity" %in% names(y))) cli::cli_abort("'bedrock_porosity' has to be defined in 'sf'.")
-    if(sum(y$bedrock_porosity<=0)>0) {
-      y$bedrock_porosity[y$bedrock_porosity<=0] <- 0.001
-      cli::cli_alert_info("Minimum bedrock porosity set to 0.1%.")
-    }
-    if(!("aquifer" %in% names(y))) {
-      cli::cli_alert_info("Column 'aquifer' was missing in 'sf'. Initializing empty aquifer.")
-      y$aquifer <- rep(0, nrow(y))
-    }
-  }
-  ## SERGHEI: Enforce same soil layer definition
-  if(watershed_model=="serghei") {
-    serghei_parameters <- watershed_control[["serghei_parameters"]]
-    y$soil <- .check_equal_soil_discretization(y$soil, serghei_parameters[["force_equal_layer_widths"]])
-  }
   
-  #duplicate input (to avoid modifying input objects)
-  y <- rlang::duplicate(y)
+  watershed_model <- watershed_control$watershed_model
+  
+  date.factor <- cut(dates, breaks=summary_frequency)
+  nSummary <- sum(table(date.factor)>0)
+  df.int <- as.numeric(date.factor)
+  t.df <- as.numeric(table(df.int))
+  nDays <- length(dates)
+  
+  raster_matching <- .raster_sf_matching(r, y)
+  sf_coords <- raster_matching$sf_coords
+  sf2cell <- raster_matching$sf2cell
+  cell2sf <- raster_matching$cell2sf
   
   #get latitude (for medfate)  
   latitude <- sf::st_coordinates(sf::st_transform(sf::st_geometry(y),4326))[,2]
-
-  # Define result cells (if not already specified)
-  if(!("result_cell" %in% names(y))) {
-    y$result_cell <- rep(FALSE, nrow(y))
-  }
   
-  # Set local control if not existing
-  if(!("local_control" %in% names(y))) {
-    y$local_control <- vector("list", nrow(y))
-  }
-  default_non_result_control <- local_control
-  default_non_result_control$standResults <- FALSE
-  default_non_result_control$plantResults <- FALSE
-  default_non_result_control$soilResults <- FALSE
-  default_non_result_control$fireHazardResults <- FALSE
-  default_non_result_control$temperatureResults <- FALSE
-  default_non_result_control$leafResults <- FALSE
-  default_non_result_control$plantLabileCarbonBalanceResults  <- FALSE
-  default_non_result_control$plantStructureResults  <- FALSE
-  default_non_result_control$growthMortalityResults  <- FALSE
-  for(i in 1:nrow(y)) {
-    if(is.null(y$local_control[[i]]) && !y$result_cell[i]) {
-      y$local_control[[i]] <- default_non_result_control
-    } 
-  }
+  # Summary flags
+  waterBalanceSummary <- "WaterBalance" %in% summary_blocks
+  standSummary <- "Stand" %in% summary_blocks
+  carbonBalanceSummary <- "CarbonBalance" %in% summary_blocks
+  biomassBalanceSummary <- "BiomassBalance" %in% summary_blocks
   
-  datesMeteo <- .get_dates_meteo(y, meteo)
-  datesStarsList <- .get_dates_stars_list(meteo)
-  if(is.null(dates)) {
-    dates <- datesMeteo
-  } else {
-    if(sum(dates %in% datesMeteo)<length(dates))
-      cli::cli_abort("Dates in 'dates' is not a subset of dates in 'meteo'.")
-  }
-  date.factor <- cut(dates, breaks=summary_frequency)
-  df.int <- as.numeric(date.factor)
-  nDays <- length(dates)
-  
-  nCells <- nrow(y)
-  isAgricultureCell <- y$land_cover_type %in% c("agriculture")
-  isWildlandCell <- y$land_cover_type %in% c("wildland")
-  isSoilCell <- y$land_cover_type %in% c("wildland", "agriculture")
-  nSoil <- sum(isSoilCell)
-  nWild <- sum(y$land_cover_type %in% c("wildland"))
-  nAgri <- sum(y$land_cover_type %in% c("agriculture"))
-  nRock <- sum(y$land_cover_type %in% c("rock"))
-  nArti <- sum(y$land_cover_type %in% c("artificial"))
-  nWater <- sum(y$land_cover_type %in% c("water"))
-  nSummary <- sum(table(date.factor)>0)
-  t.df <- as.numeric(table(df.int))
-
-  # Do not allow results on cells that are rock/artificial/water
-  y$result_cell[!isSoilCell] <- FALSE
-  
-  # TETIS: Build/check neighbours
-  if(watershed_model=="tetis") {
-    if(header_footer) cli::cli_progress_step(paste0("Determining neighbors and discharge for TETIS"))
-
-    waterOrder <- order(y$elevation, decreasing=TRUE)
-    queenNeigh <- .neighFun(r, sf2cell, cell2sf)
-    waterQ <- .waterQFun(queenNeigh, sf_coords, y$elevation)
-    #Determine outlet cells (those without downhill neighbors)
-    isOutlet <- (unlist(lapply(waterQ, sum))==0)
-    outlets <- which(isOutlet)
-    # Check
-    for(i in 1:nCells) { 
-      ni <- queenNeigh[[i]]
-      qi <- waterQ[[i]]
-      if(max(ni)>nCells || min(ni) < 1) {
-        cli::cli_abort(paste0("Cell ", i, " pointed to non-existing neighbors"))
-      }
-      if(length(qi) != length(ni)) {
-        cli::cli_abort(paste0("Cell ", i, " has different number of neighbors in 'waterQ' than 'queenNeigh'"))
-      }
-      if(!isOutlet[i]) {
-        if(abs(sum(qi) - 1) > 0.0001) {
-          cli::cli_abort(paste0("'waterQ' values for cell ", i, " do not add up to 1"))
-        }
-      }
-    }
-  }
-  if(header_footer) cli::cli_progress_done()
-  
-  #Print information area
-  if(header_footer) {
-    cli::cli_li(paste0("Hydrological model: ", toupper(watershed_model)))
-    cli::cli_li(paste0("Number of grid cells: ", nrastercells, " Number of target cells: ", nCells))
-    cli::cli_li(paste0("Average cell area: ", round(patchsize),
-                       " m2, Total area: ", round(sum(represented_area_m2, na.rm=TRUE)/10000),
-                       " ha, Target area: ", round(sum(represented_area_m2[!is.na(cell2sf)], na.rm=TRUE)/10000)," ha"))
-    cli::cli_li(paste0("Cell land use wildland: ", nWild, " agriculture: ", nAgri, " artificial: ", nArti, " rock: ", nRock, " water: ", nWater))
-    cli::cli_li(paste0("Cells with soil: ", nSoil))
-    cli::cli_li(paste0("Number of days to simulate: ",nDays))
-    cli::cli_li(paste0("Number of temporal cell summaries: ", nSummary))
-    cli::cli_li(paste0("Number of cells with daily model results requested: ", sum(y$result_cell)))
-    if(watershed_model=="tetis") cli::cli_li(paste0("Number of outlet cells: ", length(outlets)))
-    if(!is.null(meteo)) if(inherits(meteo, "stars") || inherits(meteo, "list")) cli::cli_li(paste0("Weather interpolation factor: ", watershed_control[["weather_aggregation_factor"]]))
-  }
-
-  y <- initialize_landscape(y, SpParams = SpParams, local_control = local_control, 
-                            model = local_model, replace = FALSE, progress = progress)
-
-
   # Define communication structures
   internalCommunication <- .defineInternalCommunication(y, local_model)
-  ws_day  <- .createDayOutput(nCells)
+  ws_day  <- .createDayOutput(nCells, standSummary, carbonBalanceSummary, biomassBalanceSummary)
 
+  meteo_mapping <- .get_meteo_mapping(r, y, meteo, sf_coords, sf2cell, 
+                                      watershed_control[["weather_aggregation_factor"]])
+  datesStarsList <- .get_dates_stars_list(meteo)
+  datesMeteo <- .get_dates_meteo(y, meteo)
+  
   #Output matrices
   if(watershed_model =="tetis") {
-    OutletExport_m3s <- matrix(0,nrow = nDays, ncol = length(outlets))
-    colnames(OutletExport_m3s) <- outlets
-    rownames(OutletExport_m3s) <- as.character(dates)
+    channel_cells <- which(sf_routing$channel)
+    outlet_nonchannel_cells <- which(sf_routing$outlet & !sf_routing$channel)
+
+    WatershedExport <- matrix(0,nrow = nDays, ncol = length(outlet_nonchannel_cells))
+    colnames(WatershedExport) <- outlet_nonchannel_cells
+    rownames(WatershedExport) <- as.character(dates)
+
+    ChannelExport <- matrix(0,nrow = nDays, ncol = length(channel_cells))
+    colnames(ChannelExport) <- channel_cells
+    rownames(ChannelExport) <- as.character(dates)
     
-    vars <- c("MinTemperature","MaxTemperature","PET", "Rain", "Snow",
-              "Snowmelt", "Interception", "NetRain",  
-              "Infiltration", "InfiltrationExcess",  "SaturationExcess", "Runon", "Runoff", 
-              "DeepDrainage", "CapillarityRise", "DeepAquiferLoss",
-              "SoilEvaporation", "Transpiration", "HerbTranspiration",
-              "InterflowInput", "InterflowOutput", "InterflowBalance", "BaseflowInput", "BaseflowOutput", "BaseflowBalance", "AquiferExfiltration", 
-              "SWE", "SoilVol","RWC", "WTD", "DTA")
-    varsSum <- c("PET","Runon","Runoff", "Rain", "NetRain", "Interception", "Snow", "Snowmelt",
-                 "Infiltration", "InfiltrationExcess","CapillarityRise", "DeepAquiferLoss", "DeepDrainage", "SaturationExcess",
-                 "AquiferExfiltration", "SoilEvaporation", "Transpiration", "HerbTranspiration",
-                 "InterflowInput", "InterflowOutput", "InterflowBalance", "BaseflowInput", "BaseflowOutput", "BaseflowBalance")
-    varsMean <- c( "MinTemperature", "MaxTemperature")
-    varsState <- c("SWE", "RWC", "SoilVol", "WTD")
+    vars <- .vars_summary("all", standSummary = standSummary, waterBalanceSummary = waterBalanceSummary, carbonBalanceSummary = carbonBalanceSummary, biomassBalanceSummary = biomassBalanceSummary)
+    varsSum <- .vars_summary("sum", standSummary = standSummary, waterBalanceSummary = waterBalanceSummary, carbonBalanceSummary = carbonBalanceSummary, biomassBalanceSummary = biomassBalanceSummary)
+    varsMean <- .vars_summary("mean", standSummary = standSummary, waterBalanceSummary = waterBalanceSummary, carbonBalanceSummary = carbonBalanceSummary, biomassBalanceSummary = biomassBalanceSummary)
+    varsState <- .vars_summary("state", standSummary = standSummary, waterBalanceSummary = waterBalanceSummary, carbonBalanceSummary = carbonBalanceSummary, biomassBalanceSummary = biomassBalanceSummary)
+    varsWaterBalance <- .vars_waterbalance("all")
+    varsCarbonBalance <- .vars_carbonbalance("all")
+    varsStand <- .vars_stand("all")
+    varsBiomassBalance <- .vars_biomassbalance("all")
+    
     LandscapeBalance <- data.frame(dates = dates,
                                    Precipitation = rep(0, nDays),
                                    Rain = rep(0, nDays),
@@ -766,6 +653,7 @@
                                    InterflowBalance = rep(0, nDays),
                                    BaseflowBalance = rep(0, nDays),
                                    AquiferExfiltration = rep(0, nDays),
+                                   ChannelExport = rep(0, nDays),
                                    WatershedExport = rep(0, nDays))
     SoilLandscapeBalance <- data.frame(dates = dates,
                                        Precipitation = rep(0, nDays),
@@ -837,7 +725,7 @@
       }
     }
   }
-
+  
   state_soil_summary_function <- function(object) {
     l = list(SWE=NA, RWC=NA, SoilVol=NA, WTD=NA)
     if(!is.null(object)) {
@@ -857,20 +745,8 @@
     }
     return(l)
   }
-
-  if(watershed_model=="tetis") {
-    initialSoilContent <- 0 
-    for(i in 1:nCells) {
-      if((y$land_cover_type[i] %in% c("wildland", "agriculture")) && (!is.null(y$state[[i]]))) {
-        x <- y$state[[i]]
-        initialSoilContent <- initialSoilContent + (sum(soil_water(x$soil, model = local_control$soilFunctions), na.rm=TRUE)/nSoil)
-      }
-    }
-    initialSnowContent <- sum(y$snowpack, na.rm=TRUE)/nCells
-    initialAquiferContent <- sum(y$aquifer, na.rm=TRUE)/nCells
-    initialLandscapeContent <- initialSoilContent*(nSoil/nCells)+initialAquiferContent+initialSnowContent
-  }
   
+  # INIT SERGHEI INTERFACE
   serghei_interface <-NULL
   if(watershed_model=="serghei") {
     serghei_parameters <- watershed_control[["serghei_parameters"]]
@@ -881,10 +757,19 @@
                                       y$state,
                                       input_dir = serghei_parameters[["input_dir"]],
                                       output_dir = serghei_parameters[["output_dir"]])
+  } else if(watershed_model == "tetis") {
+    # INITIAL STATE
+    initialSoilContent <- 0 
+    for(i in 1:nCells) {
+      if((y$land_cover_type[i] %in% c("wildland", "agriculture")) && (!is.null(y$state[[i]]))) {
+        x <- y$state[[i]]
+        initialSoilContent <- initialSoilContent + (sum(soil_water(x$soil, model = "VG"), na.rm=TRUE)/nSoil)
+      }
+    }
+    initialSnowContent <- sum(y$snowpack, na.rm=TRUE)/nCells
+    initialAquiferContent <- sum(y$aquifer, na.rm=TRUE)/nCells
+    initialLandscapeContent <- initialSoilContent*(nSoil/nCells)+initialAquiferContent+initialSnowContent
   }
-  
-  meteo_mapping <- .get_meteo_mapping(r, y, meteo, sf_coords, sf2cell, 
-                                      watershed_control[["weather_aggregation_factor"]])
   
   if(progress) {
     cli::cli_progress_bar("Daily simulations", total = nDays)
@@ -902,15 +787,12 @@
                          internalCommunication = internalCommunication,
                          local_model = local_model,
                          y = y,
-                         waterOrder = waterOrder, 
-                         queenNeigh = queenNeigh, 
-                         waterQ = waterQ,
+                         sf_routing = sf_routing,
                          watershed_control = watershed_control,
                          date = datechar,
                          gridMeteo = gridMeteo,
                          latitude = latitude,
-                         parallelize = parallelize, num_cores = num_cores, 
-                         chunk_size = chunk_size,
+                         standSummary = standSummary, carbonBalanceSummary = carbonBalanceSummary, biomassBalanceSummary = biomassBalanceSummary,
                          patchsize = patchsize, progress = progress)
     } else if(watershed_model=="serghei") {
       ws_day <- .watershedDaySerghei(local_model = local_model,
@@ -922,11 +804,13 @@
                                      date = datechar,
                                      gridMeteo = gridMeteo,
                                      latitude = latitude, elevation = y$elevation, slope = y$slope, aspect = y$aspect,
-                                     parallelize = parallelize, num_cores = num_cores, chunk_size = chunk_size,
                                      progress = FALSE)
     }
-
-    res_day <- ws_day[["WatershedWaterBalance"]]
+    
+    res_wb_day <- ws_day[["WatershedWaterBalance"]]
+    if(standSummary) res_stand_day <- ws_day[["WatershedStand"]]
+    if(carbonBalanceSummary) res_cb_day <- ws_day[["WatershedCarbonBalance"]]
+    if(biomassBalanceSummary) res_bb_day <- ws_day[["WatershedBiomassBalance"]]
     local_res_day <- ws_day[["LocalResults"]]
     
     # Fill local daily results for result cells
@@ -954,12 +838,34 @@
     if(watershed_model=="tetis") DTAday <- (y$depth_to_bedrock/1000.0) - (y$aquifer/y$bedrock_porosity)/1000.0
     for(i in 1:nCells) {
       for(v in varsSum) {
-        if(!is.na(summarylist[[i]][ifactor,v])) summarylist[[i]][ifactor,v] <- summarylist[[i]][ifactor,v] + res_day[[v]][i]
-        else summarylist[[i]][ifactor,v] <- res_day[[v]][i]
+        if(v %in% varsStand) {
+          if(!is.na(summarylist[[i]][ifactor,v])) summarylist[[i]][ifactor,v] <- summarylist[[i]][ifactor,v] + res_stand_day[[v]][i]
+          else summarylist[[i]][ifactor,v] <- res_stand_day[[v]][i]
+        } else if(v %in% varsCarbonBalance) {
+          if(!is.na(summarylist[[i]][ifactor,v])) summarylist[[i]][ifactor,v] <- summarylist[[i]][ifactor,v] + res_cb_day[[v]][i]
+          else summarylist[[i]][ifactor,v] <- res_cb_day[[v]][i]
+        } else if(v %in% varsBiomassBalance) {
+          if(!is.na(summarylist[[i]][ifactor,v])) summarylist[[i]][ifactor,v] <- summarylist[[i]][ifactor,v] + res_bb_day[[v]][i]
+          else summarylist[[i]][ifactor,v] <- res_bb_day[[v]][i]
+        } else {
+          if(!is.na(summarylist[[i]][ifactor,v])) summarylist[[i]][ifactor,v] <- summarylist[[i]][ifactor,v] + res_wb_day[[v]][i]
+          else summarylist[[i]][ifactor,v] <- res_wb_day[[v]][i]
+        }
       }
       for(v in varsMean) {
-        if(!is.na(summarylist[[i]][ifactor,v])) summarylist[[i]][ifactor,v] <- summarylist[[i]][ifactor,v] + res_day[[v]][i]/t.df[ifactor]
-        else summarylist[[i]][ifactor,v] <- res_day[[v]][i]/t.df[ifactor]
+        if(v %in% varsStand) {
+          if(!is.na(summarylist[[i]][ifactor,v])) summarylist[[i]][ifactor,v] <- summarylist[[i]][ifactor,v] + res_stand_day[[v]][i]/t.df[ifactor]
+          else summarylist[[i]][ifactor,v] <- res_stand_day[[v]][i]/t.df[ifactor]
+        } else if(v %in% varsCarbonBalance) {
+          if(!is.na(summarylist[[i]][ifactor,v])) summarylist[[i]][ifactor,v] <- summarylist[[i]][ifactor,v] + res_cb_day[[v]][i]/t.df[ifactor]
+          else summarylist[[i]][ifactor,v] <- res_cb_day[[v]][i]/t.df[ifactor]
+        } else if(v %in% varsBiomassBalance) {
+          if(!is.na(summarylist[[i]][ifactor,v])) summarylist[[i]][ifactor,v] <- summarylist[[i]][ifactor,v] + res_bb_day[[v]][i]/t.df[ifactor]
+          else summarylist[[i]][ifactor,v] <- res_bb_day[[v]][i]/t.df[ifactor]
+        } else {
+          if(!is.na(summarylist[[i]][ifactor,v])) summarylist[[i]][ifactor,v] <- summarylist[[i]][ifactor,v] + res_wb_day[[v]][i]/t.df[ifactor]
+          else summarylist[[i]][ifactor,v] <- res_wb_day[[v]][i]/t.df[ifactor]
+        }
       }
       if(!is.null(y$state[[i]])) {
         summary_i <- state_soil_summary_function(y$state[[i]])
@@ -973,70 +879,76 @@
         else summarylist[[i]][ifactor,"DTA"] <- DTAday[i]/t.df[ifactor]
       }
     }
-
-    ## Store watershed runoff reaching each outlet (m3s)
+    
+    ## Store watershed runoff reaching each outlet and channel
     if(watershed_model=="tetis") {
-      OutletExport_m3s[day,] <- (res_day$WatershedExport[outlets]/1e3)*patchsize/(3600*24)
+      WatershedExport[day,] <- res_wb_day$WatershedExport[outlet_nonchannel_cells]
+      ChannelExport[day,] <- res_wb_day$ChannelExport[channel_cells]
     }
-
+    
     #Landscape balance
-    LandscapeBalance$Rain[day] <- sum(res_day$Rain, na.rm=T)/nCells
-    LandscapeBalance$Snow[day] <- sum(res_day$Snow, na.rm=T)/nCells
-    LandscapeBalance$Snowmelt[day] <- sum(res_day$Snowmelt, na.rm=T)/nCells
-    LandscapeBalance$NetRain[day] <- sum(res_day$NetRain, na.rm=T)/nCells
-    LandscapeBalance$SoilEvaporation[day] <- sum(res_day$SoilEvaporation, na.rm=T)/nCells
-    LandscapeBalance$Transpiration[day] <- sum(res_day$Transpiration, na.rm=T)/nCells
-    LandscapeBalance$HerbTranspiration[day] <- sum(res_day$HerbTranspiration, na.rm=T)/nCells
-    LandscapeBalance$Interception[day] <- (sum(res_day$Rain, na.rm=T) - sum(res_day$NetRain, na.rm=T))/nCells
-
+    LandscapeBalance$Rain[day] <- sum(res_wb_day$Rain, na.rm=T)/nCells
+    LandscapeBalance$Snow[day] <- sum(res_wb_day$Snow, na.rm=T)/nCells
+    LandscapeBalance$Snowmelt[day] <- sum(res_wb_day$Snowmelt, na.rm=T)/nCells
+    LandscapeBalance$NetRain[day] <- sum(res_wb_day$NetRain, na.rm=T)/nCells
+    LandscapeBalance$SoilEvaporation[day] <- sum(res_wb_day$SoilEvaporation, na.rm=T)/nCells
+    LandscapeBalance$Transpiration[day] <- sum(res_wb_day$Transpiration, na.rm=T)/nCells
+    LandscapeBalance$HerbTranspiration[day] <- sum(res_wb_day$HerbTranspiration, na.rm=T)/nCells
+    LandscapeBalance$Interception[day] <- (sum(res_wb_day$Rain, na.rm=T) - sum(res_wb_day$NetRain, na.rm=T))/nCells
+    
     if(watershed_model=="tetis") {
-      LandscapeBalance$DeepDrainage[day] <- sum(res_day$DeepDrainage, na.rm=T)/nCells
-      LandscapeBalance$SaturationExcess[day] <- sum(res_day$SaturationExcess, na.rm=T)/nCells
-      LandscapeBalance$InfiltrationExcess[day] <- sum(res_day$InfiltrationExcess, na.rm=T)/nCells
-      LandscapeBalance$CapillarityRise[day] <- sum(res_day$CapillarityRise, na.rm=T)/nCells
-      LandscapeBalance$DeepAquiferLoss[day] <- sum(res_day$DeepAquiferLoss, na.rm=T)/nCells
-      LandscapeBalance$AquiferExfiltration[day] <- sum(res_day$AquiferExfiltration, na.rm=T)/nCells
-      LandscapeBalance$CellRunoff[day] <- sum(res_day$Runoff, na.rm=T)/nCells
-      LandscapeBalance$CellRunon[day] <- sum(res_day$Runon, na.rm=T)/nCells
-      LandscapeBalance$Infiltration[day] <- sum(res_day$Infiltration, na.rm=T)/nCells
-      LandscapeBalance$WatershedExport[day] <- (sum(res_day$WatershedExport[outlets], na.rm=T)/nCells)
-      LandscapeBalance$InterflowBalance[day] <- sum(res_day$InterflowBalance, na.rm=T)/nCells
-      LandscapeBalance$BaseflowBalance[day] <- sum(res_day$BaseflowBalance, na.rm=T)/nCells
+      LandscapeBalance$DeepDrainage[day] <- sum(res_wb_day$DeepDrainage, na.rm=T)/nCells
+      LandscapeBalance$SaturationExcess[day] <- sum(res_wb_day$SaturationExcess, na.rm=T)/nCells
+      LandscapeBalance$InfiltrationExcess[day] <- sum(res_wb_day$InfiltrationExcess, na.rm=T)/nCells
+      LandscapeBalance$CapillarityRise[day] <- sum(res_wb_day$CapillarityRise, na.rm=T)/nCells
+      LandscapeBalance$DeepAquiferLoss[day] <- sum(res_wb_day$DeepAquiferLoss, na.rm=T)/nCells
+      LandscapeBalance$AquiferExfiltration[day] <- sum(res_wb_day$AquiferExfiltration, na.rm=T)/nCells
+      LandscapeBalance$CellRunoff[day] <- sum(res_wb_day$Runoff, na.rm=T)/nCells
+      LandscapeBalance$CellRunon[day] <- sum(res_wb_day$Runon, na.rm=T)/nCells
+      LandscapeBalance$Infiltration[day] <- sum(res_wb_day$Infiltration, na.rm=T)/nCells
+      LandscapeBalance$InterflowBalance[day] <- sum(res_wb_day$InterflowBalance, na.rm=T)/nCells
+      LandscapeBalance$BaseflowBalance[day] <- sum(res_wb_day$BaseflowBalance, na.rm=T)/nCells
+      LandscapeBalance$ChannelExport[day] <- sum(res_wb_day$ChannelExport, na.rm=T)/nCells
+      LandscapeBalance$WatershedExport[day] <- sum(res_wb_day$WatershedExport, na.rm=T)/nCells
       
-      SoilLandscapeBalance$Rain[day] <- sum(res_day$Rain[isSoilCell], na.rm=T)/nSoil
-      SoilLandscapeBalance$Snow[day] <- sum(res_day$Snow[isSoilCell], na.rm=T)/nSoil
-      SoilLandscapeBalance$DeepDrainage[day] <- sum(res_day$DeepDrainage[isSoilCell], na.rm=T)/nSoil
-      SoilLandscapeBalance$InfiltrationExcess[day] <- sum(res_day$InfiltrationExcess[isSoilCell], na.rm=T)/nSoil
-      SoilLandscapeBalance$SaturationExcess[day] <- sum(res_day$SaturationExcess[isSoilCell], na.rm=T)/nSoil
-      SoilLandscapeBalance$CapillarityRise[day] <- sum(res_day$CapillarityRise[isSoilCell], na.rm=T)/nSoil
-      SoilLandscapeBalance$DeepAquiferLoss[day] <- sum(res_day$DeepAquiferLoss, na.rm=T)/nSoil
-      SoilLandscapeBalance$AquiferExfiltration[day] <- sum(res_day$AquiferExfiltration[isSoilCell], na.rm=T)/nSoil
-      SoilLandscapeBalance$InterflowBalance[day] <- sum(res_day$InterflowBalance[isSoilCell], na.rm=T)/nSoil
-      SoilLandscapeBalance$CellRunoff[day] <- sum(res_day$Runoff[isSoilCell], na.rm=T)/nSoil
-      SoilLandscapeBalance$CellRunon[day] <- sum(res_day$Runon[isSoilCell], na.rm=T)/nSoil
-      SoilLandscapeBalance$Snowmelt[day] <- sum(res_day$Snowmelt[isSoilCell], na.rm=T)/nSoil
-      SoilLandscapeBalance$NetRain[day] <- sum(res_day$NetRain[isSoilCell], na.rm=T)/nSoil
-      SoilLandscapeBalance$Interception[day] <- (sum(res_day$Rain[isSoilCell], na.rm=T) - sum(res_day$NetRain[isSoilCell], na.rm=T))/nSoil
-      SoilLandscapeBalance$Infiltration[day] <- sum(res_day$Infiltration[isSoilCell], na.rm=T)/nSoil
-      SoilLandscapeBalance$SoilEvaporation[day] <- sum(res_day$SoilEvaporation[isSoilCell], na.rm=T)/nSoil
-      SoilLandscapeBalance$Transpiration[day] <- sum(res_day$Transpiration[isSoilCell], na.rm=T)/nSoil
-      SoilLandscapeBalance$HerbTranspiration[day] <- sum(res_day$HerbTranspiration[isSoilCell], na.rm=T)/nSoil
+      if(nSoil>0) {
+        SoilLandscapeBalance$Rain[day] <- sum(res_wb_day$Rain[isSoilCell], na.rm=T)/nSoil
+        SoilLandscapeBalance$Snow[day] <- sum(res_wb_day$Snow[isSoilCell], na.rm=T)/nSoil
+        SoilLandscapeBalance$DeepDrainage[day] <- sum(res_wb_day$DeepDrainage[isSoilCell], na.rm=T)/nSoil
+        SoilLandscapeBalance$InfiltrationExcess[day] <- sum(res_wb_day$InfiltrationExcess[isSoilCell], na.rm=T)/nSoil
+        SoilLandscapeBalance$SaturationExcess[day] <- sum(res_wb_day$SaturationExcess[isSoilCell], na.rm=T)/nSoil
+        SoilLandscapeBalance$CapillarityRise[day] <- sum(res_wb_day$CapillarityRise[isSoilCell], na.rm=T)/nSoil
+        SoilLandscapeBalance$DeepAquiferLoss[day] <- sum(res_wb_day$DeepAquiferLoss, na.rm=T)/nSoil
+        SoilLandscapeBalance$AquiferExfiltration[day] <- sum(res_wb_day$AquiferExfiltration[isSoilCell], na.rm=T)/nSoil
+        SoilLandscapeBalance$InterflowBalance[day] <- sum(res_wb_day$InterflowBalance[isSoilCell], na.rm=T)/nSoil
+        SoilLandscapeBalance$CellRunoff[day] <- sum(res_wb_day$Runoff[isSoilCell], na.rm=T)/nSoil
+        SoilLandscapeBalance$CellRunon[day] <- sum(res_wb_day$Runon[isSoilCell], na.rm=T)/nSoil
+        SoilLandscapeBalance$Snowmelt[day] <- sum(res_wb_day$Snowmelt[isSoilCell], na.rm=T)/nSoil
+        SoilLandscapeBalance$NetRain[day] <- sum(res_wb_day$NetRain[isSoilCell], na.rm=T)/nSoil
+        SoilLandscapeBalance$Interception[day] <- (sum(res_wb_day$Rain[isSoilCell], na.rm=T) - sum(res_wb_day$NetRain[isSoilCell], na.rm=T))/nSoil
+        SoilLandscapeBalance$Infiltration[day] <- sum(res_wb_day$Infiltration[isSoilCell], na.rm=T)/nSoil
+        SoilLandscapeBalance$SoilEvaporation[day] <- sum(res_wb_day$SoilEvaporation[isSoilCell], na.rm=T)/nSoil
+        SoilLandscapeBalance$Transpiration[day] <- sum(res_wb_day$Transpiration[isSoilCell], na.rm=T)/nSoil
+        SoilLandscapeBalance$HerbTranspiration[day] <- sum(res_wb_day$HerbTranspiration[isSoilCell], na.rm=T)/nSoil
+      }
     }
     if(progress) cli::cli_progress_update()
   }
   if(progress) cli::cli_progress_done()
   
-
-  #Average summaries
+  if(watershed_model=="serghei") {
+    .finishSerghei()
+  }
+  
   LandscapeBalance$Precipitation <- LandscapeBalance$Rain + LandscapeBalance$Snow
-  if(watershed_model=="tetis") {
+  if(watershed_model == "tetis"){
     SoilLandscapeBalance$Precipitation <- SoilLandscapeBalance$Rain + SoilLandscapeBalance$Snow
-    
+    # FINAL CONTENT
     finalSoilContent <- 0 
     for(i in 1:nCells) {
       if((y$land_cover_type[i] %in% c("wildland", "agriculture")) && (!is.null(y$state[[i]]))) {
         x <- y$state[[i]]
-        finalSoilContent <- finalSoilContent + (sum(soil_water(x$soil, local_control$soilFunctions), na.rm=TRUE)/nSoil)
+        finalSoilContent <- finalSoilContent + (sum(soil_water(x$soil, "VG"), na.rm=TRUE)/nSoil)
       }
     }
     finalSnowContent <- sum(y$snowpack, na.rm=TRUE)/nCells
@@ -1060,7 +972,6 @@
     Transpirationsum <- sum(LandscapeBalance$Transpiration , na.rm=T)
     HerbTranspirationsum <- sum(LandscapeBalance$HerbTranspiration , na.rm=T)
     AquiferExfiltrationsum <- sum(LandscapeBalance$AquiferExfiltration , na.rm=T)
-    WatershedExportsum <- sum(LandscapeBalance$WatershedExport, na.rm=T)
     InterflowBalancesum <- sum(LandscapeBalance$InterflowBalance , na.rm=T)
     BaseflowBalancesum <- sum(LandscapeBalance$BaseflowBalance , na.rm=T)
     snowpack_wb <- Snowsum - Snowmeltsum
@@ -1080,6 +991,9 @@
     SoilHerbTranspirationsum <- sum(SoilLandscapeBalance$HerbTranspiration , na.rm=T)
     SoilTranspirationsum <- sum(SoilLandscapeBalance$Transpiration , na.rm=T)
     SoilInterflowBalancesum <- sum(SoilLandscapeBalance$InterflowBalance , na.rm=T)
+    ChannelExportsum <- sum(ChannelExport, na.rm=T)/nCells
+    WatershedExportsum <- sum(WatershedExport, na.rm=T)/nCells
+
     soil_input <- (SoilInfiltrationsum + SoilCapillarityRisesum + SoilInterflowBalancesum)
     soil_output <- (SoilDeepDrainagesum + SoilSoilEvaporationsum + SoilHerbTranspirationsum + SoilTranspirationsum + SoilSaturationExcesssum)
     soil_wb <-  soil_input - soil_output
@@ -1094,18 +1008,25 @@
       cli::cli_li(paste0("Aquifer balance",
                          " content (mm): ", round(finalAquiferContent - initialAquiferContent,2),
                          " fluxes (mm): ",round(aquifer_wb,2)))
+      cli::cli_li(paste0("Aquifer fluxes (mm)",
+                         " Drainage input: ", round(DeepDrainagesum,2),
+                         " Exfiltration: ",round(AquiferExfiltrationsum,2),
+                         " Capillary rise: ",round(CapillarityRisesum,2),
+                         " Deep loss: ",round(DeepAquiferLosssum,2)))
     }
     
-    landscape_wb <- Precipitationsum + InterflowBalancesum + BaseflowBalancesum - WatershedExportsum - SoilEvaporationsum - Transpirationsum - HerbTranspirationsum - Interceptionsum - DeepAquiferLosssum
+    landscape_etp <- SoilEvaporationsum + Transpirationsum + HerbTranspirationsum + Interceptionsum
+    landscape_wb <- Precipitationsum - ChannelExportsum - WatershedExportsum - landscape_etp - DeepAquiferLosssum
     if(header_footer) {
       cli::cli_li(paste0("Watershed balance",
                          " content (mm): ", round(finalLandscapeContent - initialLandscapeContent,2),
                          " fluxes (mm): ",round(landscape_wb,2)))
+      cli::cli_li(paste0("Watershed fluxes (mm)",
+                         " Precipitation: ", round(Precipitationsum,2),
+                         " Surface export: ",round(ChannelExportsum + WatershedExportsum,2),
+                         " Evapotransp.: ",round(landscape_etp,2),
+                         " Deep loss: ",round(DeepAquiferLosssum,2)))
     }
-  }
-  if(watershed_model=="serghei") {
-    .finishSerghei()
-    if(header_footer) cli::cli_li("Water balance check not possible with SERGHEI")
   }
   
   sf <- sf::st_sf(geometry=sf::st_geometry(y))
@@ -1114,23 +1035,384 @@
   sf$snowpack <- y$snowpack
   sf$summary <- summarylist
   sf$result <- resultlist
-  if(watershed_model=="tetis") sf$outlet <- isOutlet
-  
   if(watershed_model=="tetis") {
-    l <- list(watershed_control = watershed_control,
-              sf = sf::st_as_sf(tibble::as_tibble(sf)),
-              overland_routing = list(waterOrder = waterOrder,
-                                      queenNeigh = queenNeigh,
-                                      waterQ = waterQ),
+    l <- list(sf = sf::st_as_sf(tibble::as_tibble(sf)),
               watershed_balance = LandscapeBalance,
               watershed_soil_balance = SoilLandscapeBalance,
-              outlet_export_m3s = OutletExport_m3s)
+              channel_export = ChannelExport,
+              watershed_export = WatershedExport)
   } else {
     l <- list(sf = sf::st_as_sf(tibble::as_tibble(sf)),
               watershed_balance = LandscapeBalance)
   }
-  class(l)<-c(land_model, "list")
   return(l)
+}
+
+.f_subwatershed_inner<-function(xi, 
+                                raster_wrap,
+                                local_model, 
+                                meteo, dates,
+                                CO2ByYear, 
+                                summary_frequency,
+                                summary_blocks,
+                                watershed_control,
+                                progress = FALSE, header_footer = progress) {
+  return(.simulate_land_inner(local_model = local_model,
+                              r = terra::unwrap(raster_wrap), 
+                              y = xi[["y"]], 
+                              sf_routing = xi[["sf_routing"]], 
+                              meteo = meteo, dates = dates,
+                              CO2ByYear = CO2ByYear, 
+                              summary_frequency = summary_frequency,
+                              summary_blocks = summary_blocks,
+                              watershed_control = watershed_control,
+                              progress = progress, header_footer = header_footer))
+}
+
+.simulate_land<-function(land_model = "spwb_land", 
+                         r, y, SpParams, meteo, dates = NULL,
+                         CO2ByYear = numeric(0), 
+                         summary_blocks = NULL,
+                         summary_frequency = "years",
+                         local_control = medfate::defaultControl(),
+                         watershed_control = default_watershed_control(),
+                         parallelize = FALSE, num_cores = detectCores()-1,
+                         progress = TRUE, header_footer = progress) {
+
+
+  if(header_footer) cli::cli_h2("INPUT CHECKING")
+  
+  #land (local) model
+  land_model <- match.arg(land_model, c("spwb_land", "growth_land", "fordyn_land"))
+  if(land_model == "spwb_land") {
+    local_model <- "spwb"
+    summary_blocks <- match.arg(summary_blocks, c(NA, "WaterBalance", "Stand"),several.ok = TRUE)
+  } else if(land_model=="growth_land") {
+    local_model <- "growth"
+    summary_blocks <- match.arg(summary_blocks, c(NA,"WaterBalance", "Stand","CarbonBalance", "BiomassBalance"),several.ok = TRUE)
+  }
+  else if(land_model=="fordyn_land") local_model <- "growth"
+  
+  summary_frequency <- match.arg(summary_frequency, c("days", "weeks","months", "quarters","years"))
+  
+  #watershed model
+  watershed_model <- watershed_control$watershed_model
+  watershed_model <- match.arg(watershed_model, c("tetis", "serghei"))
+  
+  #check input
+  
+  if(!inherits(y, "sf")) cli::cli_abort("'sf' has to be of class 'sf'.")
+  
+  if(header_footer) cli::cli_progress_step(paste0("Checking raster topology"))
+  raster_matching <- .raster_sf_matching(r, y)
+  sf_coords <- raster_matching$sf_coords
+  sf2cell <- raster_matching$sf2cell
+  cell2sf <- raster_matching$cell2sf
+  nrastercells <- prod(dim(r)[1:2])
+  
+  if(header_footer) cli::cli_progress_step(paste0("Checking 'sf' data columns"))
+  .check_sf_input(y)
+  if(!is.null(dates)) if(!inherits(dates, "Date")) cli::cli_abort("'dates' has to be of class 'Date'.")
+
+  represented_area_m2 <- as.vector(terra::values(terra::cellSize(r)))
+  patchsize <- mean(represented_area_m2, na.rm=TRUE)
+
+  if(!("snowpack" %in% names(y))) {
+    cli::cli_alert_info("Column 'snowpack' was missing in 'sf'. Initializing empty snowpack.")
+    y$snowpack <- rep(0, nrow(y))
+  }
+  ## TETIS: Check additional elements
+  if(watershed_model == "tetis") {
+    if(!("depth_to_bedrock" %in% names(y))) cli::cli_abort("'depth_to_bedrock' has to be defined in 'sf'.")
+    if(!("bedrock_conductivity" %in% names(y))) cli::cli_abort("'bedrock_conductivity' has to be defined in 'sf'.")
+    if(!("bedrock_porosity" %in% names(y))) cli::cli_abort("'bedrock_porosity' has to be defined in 'sf'.")
+    if(sum(y$bedrock_porosity<=0)>0) {
+      y$bedrock_porosity[y$bedrock_porosity<=0] <- 0.001
+      cli::cli_alert_info("Minimum bedrock porosity set to 0.1%.")
+    }
+    if(!("aquifer" %in% names(y))) {
+      cli::cli_alert_info("Column 'aquifer' was missing in 'sf'. Initializing empty aquifer.")
+      y$aquifer <- rep(0, nrow(y))
+    }
+  }
+  ## SERGHEI: Enforce same soil layer definition
+  if(watershed_model=="serghei") {
+    serghei_parameters <- watershed_control[["serghei_parameters"]]
+    y$soil <- .check_equal_soil_discretization(y$soil, serghei_parameters[["force_equal_layer_widths"]])
+  }
+  
+  #duplicate input (to avoid modifying input objects)
+  y <- rlang::duplicate(y)
+  
+  # Define result cells (if not already specified)
+  if(!("result_cell" %in% names(y))) {
+    y$result_cell <- rep(FALSE, nrow(y))
+  }
+  
+  # Set local control if not existing
+  if(!("local_control" %in% names(y))) {
+    y$local_control <- vector("list", nrow(y))
+  }
+  default_non_result_control <- local_control
+  default_non_result_control$standResults <- FALSE
+  default_non_result_control$plantResults <- FALSE
+  default_non_result_control$soilResults <- FALSE
+  default_non_result_control$fireHazardResults <- FALSE
+  default_non_result_control$temperatureResults <- FALSE
+  default_non_result_control$leafResults <- FALSE
+  default_non_result_control$plantLabileCarbonBalanceResults  <- FALSE
+  default_non_result_control$plantStructureResults  <- FALSE
+  default_non_result_control$growthMortalityResults  <- FALSE
+  for(i in 1:nrow(y)) {
+    if(is.null(y$local_control[[i]]) && !y$result_cell[i]) {
+      y$local_control[[i]] <- default_non_result_control
+    } 
+  }
+  
+  datesMeteo <- .get_dates_meteo(y, meteo)
+  if(is.null(dates)) {
+    dates <- datesMeteo
+  } else {
+    if(sum(dates %in% datesMeteo)<length(dates))
+      cli::cli_abort("Dates in 'dates' is not a subset of dates in 'meteo'.")
+  }
+  date.factor <- cut(dates, breaks=summary_frequency)
+  df.int <- as.numeric(date.factor)
+  nDays <- length(dates)
+  
+  nCells <- nrow(y)
+  isAgricultureCell <- y$land_cover_type %in% c("agriculture")
+  isWildlandCell <- y$land_cover_type %in% c("wildland")
+  isSoilCell <- y$land_cover_type %in% c("wildland", "agriculture")
+  nSoil <- sum(isSoilCell)
+  nWild <- sum(y$land_cover_type %in% c("wildland"))
+  nAgri <- sum(y$land_cover_type %in% c("agriculture"))
+  nRock <- sum(y$land_cover_type %in% c("rock"))
+  nArti <- sum(y$land_cover_type %in% c("artificial"))
+  nWater <- sum(y$land_cover_type %in% c("water"))
+  nSummary <- sum(table(date.factor)>0)
+
+  # Do not allow results on cells that are rock/artificial/water
+  y$result_cell[!isSoilCell] <- FALSE
+  
+  # TETIS: Build/check neighbours
+  if(header_footer) cli::cli_progress_step(paste0("Determining neighbors and overland routing for TETIS"))
+  sf_routing <- .overland_routing_inner(r, y, 
+                                        raster_matching = raster_matching, 
+                                        channel_flow_speed = watershed_control$tetis_parameters$channel_flow_speed, 
+                                        patchsize = patchsize,
+                                        subwatersheds = watershed_control$tetis_parameters$subwatersheds,
+                                        max_overlap = watershed_control$tetis_parameters$max_overlap)
+  if(header_footer) cli::cli_progress_done()
+  
+  #Print information area
+  if(header_footer) {
+    cli::cli_li(paste0("Hydrological model: ", toupper(watershed_model)))
+    cli::cli_li(paste0("Number of grid cells: ", nrastercells, " Number of target cells: ", nCells))
+    cli::cli_li(paste0("Average cell area: ", round(patchsize),
+                       " m2, Total area: ", round(sum(represented_area_m2, na.rm=TRUE)/10000),
+                       " ha, Target area: ", round(sum(represented_area_m2[!is.na(cell2sf)], na.rm=TRUE)/10000)," ha"))
+    cli::cli_li(paste0("Cell land use [wildland: ", nWild, " agriculture: ", nAgri, " artificial: ", nArti, " rock: ", nRock, " water: ", nWater, "]"))
+    cli::cli_li(paste0("Cells with soil: ", nSoil))
+    cli::cli_li(paste0("Number of days to simulate: ",nDays))
+    cli::cli_li(paste0("Number of temporal cell summaries: ", nSummary))
+    cli::cli_li(paste0("Number of cells with daily model results requested: ", sum(y$result_cell)))
+    cli::cli_li(paste0("Number of channel cells: ", sum(sf_routing$channel)))
+    cli::cli_li(paste0("Number of outlet cells: ", sum(sf_routing$outlet)))
+    if(watershed_model =="tetis" && watershed_control$tetis_parameters$subwatersheds) cli::cli_li(paste0("Number of subwatersheds: ", length(unique(sf_routing$subwatershed))))
+    if(!is.null(meteo)) if(inherits(meteo, "stars") || inherits(meteo, "list")) cli::cli_li(paste0("Weather interpolation factor: ", watershed_control[["weather_aggregation_factor"]]))
+  }
+
+  if(header_footer) cli::cli_h2("INITIALISATION")
+  
+  y <- initialize_landscape(y, SpParams = SpParams, local_control = local_control, 
+                            model = local_model, replace = FALSE, progress = progress)
+
+
+  if(watershed_model =="serghei") {
+    if(header_footer) cli::cli_h2("WHOLE-WATERSHED SIMULATION")
+    # SIMULATE SERGHEI
+    res <- .simulate_land_inner(local_model = local_model,
+                                r = r, y = y, sf_routing = sf_routing, 
+                                meteo = meteo, dates = dates,
+                                CO2ByYear = CO2ByYear, 
+                                summary_frequency = summary_frequency,
+                                summary_blocks = summary_blocks,
+                                watershed_control = watershed_control,
+                                progress = progress, header_footer = header_footer) 
+    if(header_footer) cli::cli_li("Water balance check not possible with SERGHEI")
+  } else {
+
+    # SIMULATION
+    if(watershed_control$tetis_parameters$subwatersheds) {
+      # print(names(sf_routing))
+      subwatersheds <- unique(sf_routing$subwatershed)
+      sf <- sf::st_sf(geometry=sf::st_geometry(y))
+      sf$state <- vector("list", nCells)
+      sf$aquifer <- rep(NA, nCells)
+      sf$snowpack <- rep(NA, nCells)
+      sf$summary <- vector("list", nCells)
+      sf$result <- vector("list", nCells)
+
+      channel_cells <- which(sf_routing$channel)
+      outlet_nonchannel_cells <- which(sf_routing$outlet & !sf_routing$channel)
+      
+      WatershedExport <- matrix(0,nrow = nDays, ncol = length(outlet_nonchannel_cells))
+      colnames(WatershedExport) <- outlet_nonchannel_cells
+      rownames(WatershedExport) <- as.character(dates)
+      
+      ChannelExport <- matrix(0,nrow = nDays, ncol = length(channel_cells))
+      colnames(ChannelExport) <- channel_cells
+      rownames(ChannelExport) <- as.character(dates)
+      
+      XI <- vector("list", length(subwatersheds))
+      for(i in subwatersheds) {
+        sel_subwatershed <- sf_routing$subwatershed==i
+        XI[[i]] <- list("y" = y[sel_subwatershed, , drop = FALSE],
+                        "sf_routing" = sf_routing[sel_subwatershed, , drop = FALSE])
+      }
+      
+      if(parallelize) {
+        nc <- min(num_cores, length(subwatersheds))
+        if(header_footer) cli::cli_h2(paste0("PARALLEL SIMULATION of ", length(subwatersheds), " SUB-WATERSHEDS in ",nc, " NODES"))
+        
+        cl<-parallel::makeCluster(nc)
+        tryCatch({
+          res_inner_list <- parallel::clusterApply(cl = cl, 
+                                                   x = XI, 
+                                                   fun = .f_subwatershed_inner, 
+                                                   raster_wrap = terra::wrap(r),
+                                                   local_model = local_model,
+                                                   meteo = meteo, dates = dates,
+                                                   CO2ByYear = CO2ByYear, 
+                                                   summary_frequency = summary_frequency,
+                                                   summary_blocks = summary_blocks,
+                                                   watershed_control = watershed_control,
+                                                   progress = FALSE, header_footer = FALSE)
+        },
+        finally = {
+          parallel::stopCluster(cl)
+        })
+      } else {
+        res_inner_list <- vector("list", length(subwatersheds))
+        for(i in subwatersheds) {
+          sel_subwatershed <- sf_routing$subwatershed==i
+          nCellsSub <- sum(sel_subwatershed)
+          if(header_footer) cli::cli_h2(paste0("SIMULATION of SUB-WATERSHED #", i, " (", nCellsSub, " cells)"))
+          res_inner_list[[i]] <- .f_subwatershed_inner(XI[[i]],
+                                                       raster_wrap = terra::wrap(r),
+                                                       local_model = local_model,
+                                                       meteo = meteo, dates = dates,
+                                                       CO2ByYear = CO2ByYear, 
+                                                       summary_frequency = summary_frequency,
+                                                       summary_blocks = summary_blocks,
+                                                       watershed_control = watershed_control,
+                                                       progress = progress, header_footer = header_footer)
+        }
+      }
+      if(header_footer) cli::cli_h2("MERGING SUB-WATERSHED RESULTS")
+      for(i in subwatersheds) {
+        res_inner_sub <- res_inner_list[[i]]
+        sel_subwatershed <- sf_routing$subwatershed==i
+        nCellsSub <- sum(sel_subwatershed)
+        sf_sub <- res_inner_sub$sf
+        sf$state[sel_subwatershed] <- sf_sub$state
+        sf$aquifer[sel_subwatershed] <- sf_sub$aquifer
+        sf$snowpack[sel_subwatershed] <- sf_sub$snowpack
+        sf$summary[sel_subwatershed] <- sf_sub$summary
+        sf$result[sel_subwatershed] <- sf_sub$result
+        
+        watershed_balance_sub <- res_inner_sub$watershed_balance
+        watershed_soil_balance_sub <- res_inner_sub$watershed_soil_balance
+        watershed_balance_sub[,-1] <- watershed_balance_sub[,-1]*(nCellsSub/nCells)
+        watershed_soil_balance_sub[,-1] <- watershed_soil_balance_sub[,-1]*(nCellsSub/nCells)
+        if(i==1) {
+          LandscapeBalance <- watershed_balance_sub
+          SoilLandscapeBalance <- watershed_soil_balance_sub
+        } else {
+          LandscapeBalance[,-1] <- LandscapeBalance[,-1] + watershed_balance_sub[,-1]
+          SoilLandscapeBalance[,-1] <- SoilLandscapeBalance[,-1] + watershed_soil_balance_sub[,-1]
+        }
+        channel_cells_sub <- channel_cells %in% which(sel_subwatershed)
+        outlet_nonchannel_cells_sub <- outlet_nonchannel_cells %in% which(sel_subwatershed)
+        ChannelExport[,channel_cells_sub] <- res_inner_sub$channel_export
+        WatershedExport[,outlet_nonchannel_cells_sub] <- res_inner_sub$watershed_export
+      }
+      res_inner <- list(sf = sf::st_as_sf(tibble::as_tibble(sf)),
+                        watershed_balance = LandscapeBalance,
+                        watershed_soil_balance = SoilLandscapeBalance,
+                        channel_export = ChannelExport,
+                        watershed_export = WatershedExport)
+      
+    } else {
+      if(header_footer) cli::cli_h2("WHOLE-WATERSHED SIMULATION")
+      res_inner <- .simulate_land_inner(local_model = local_model,
+                                        r = r, y = y, sf_routing = sf_routing, 
+                                        meteo = meteo, dates = dates,
+                                        CO2ByYear = CO2ByYear, 
+                                        summary_frequency = summary_frequency,
+                                        summary_blocks = summary_blocks,
+                                        watershed_control = watershed_control,
+                                        progress = progress, header_footer = header_footer) 
+    }
+    
+    outlet_cells <- which(sf_routing$outlet)
+    channel_cells <- which(sf_routing$channel)
+    
+    outlet_non_channel <- !(outlet_cells %in% which(sf_routing$channel))
+    # print(sum(outlet_non_channel))
+    # print(length(outlet_cells))
+    
+    OutletExport_m3s <- matrix(0,nrow = nDays, ncol = length(outlet_cells))
+    colnames(OutletExport_m3s) <- outlet_cells
+    rownames(OutletExport_m3s) <- as.character(dates)
+    # From mm/day = L/m2/day to m3/s
+    # 1 L = 1 dm3 = 1e-3 m3
+    # 1 d = 24h = 24*3600 s
+    # Multiply by patch size to go from m3/m2 to m3 in the whole patch
+    OutletExport_m3s[, outlet_non_channel] <- (res_inner$watershed_export/1e3)*patchsize/(3600*24)
+    ChannelExport_m3s <- (res_inner$channel_export/1e3)*patchsize/(3600*24)
+    initial_backlog_sum <- (sum(unlist(lapply(sf_routing$outlet_backlog, sum, na.rm= TRUE)))/1e3)*patchsize
+    initial_outlet_amount <- sum(OutletExport_m3s*(3600*24))
+    transport_target <- sum(ChannelExport_m3s*(3600*24))
+    if(sum(sf_routing$channel)>0) {
+      if(header_footer) {
+        cli::cli_h2("CHANNEL ROUTING")
+        cli::cli_li(paste0("Initial outlet backlog sum (m3): ", round(initial_backlog_sum)))
+      }
+      for(day in 1:nDays) {
+        # cat(paste0("day ", day,"\n"))
+        ChannelExport_vector <- rep(0, nCells)
+        ChannelExport_vector[channel_cells] <- res_inner$channel_export[day,]
+        WatershedExport_vector <- rep(0, nCells)
+        .tetisChannelRouting(ChannelExport_vector, WatershedExport_vector,
+                             sf_routing$channel, sf_routing$outlet, 
+                             sf_routing$target_outlet, sf_routing$distance_to_outlet, sf_routing$outlet_backlog,
+                             watershed_control, patchsize)
+        OutletExport_m3s[day, ] <- OutletExport_m3s[day,] + (WatershedExport_vector[outlet_cells]/1e3)*patchsize/(3600*24)
+      }
+      final_backlog_sum <- (sum(unlist(lapply(sf_routing$outlet_backlog, sum, na.rm= TRUE)))/1e3)*patchsize
+      final_outlet_amount <- sum(OutletExport_m3s*(3600*24))
+      if(header_footer) {
+        cli::cli_li(paste0("Channel balance target (m3): ", round(transport_target), " outlet change (m3): ", round(final_outlet_amount - initial_outlet_amount), " backlog change (m3): ", round(final_backlog_sum - initial_backlog_sum)))
+        cli::cli_li(paste0("Final outlet backlog sum (m3): ", round(final_backlog_sum)))
+      }
+    }
+    
+    sf_out <- res_inner$sf
+    sf_out$outlet <- sf_routing$outlet
+    sf_out$outlet_backlog <- sf_routing$outlet_backlog
+
+    res <- list(watershed_control = watershed_control,
+                sf = sf_out,
+                watershed_balance = res_inner$watershed_balance,
+                watershed_soil_balance = res_inner$watershed_soil_balance,
+                channel_export_m3s = ChannelExport_m3s,
+                outlet_export_m3s = OutletExport_m3s)
+  }
+  
+  class(res)<-c(land_model, "list")
+  return(res)
 }
 
 
@@ -1174,22 +1456,24 @@
 #'   \itemize{
 #'     \item{\code{aquifer}: A numeric vector with the water content of the aquifer in each cell (in mm). If missing, it will be initialized to zero.}
 #'     \item{\code{deep_aquifer_loss}: A numeric vector with the maximum daily loss to a deeper aquifer (in mm·day-1). If missing all cells take their value from \code{deep_aquifer_loss} in \code{\link{default_watershed_control}}}
+#'     \item{\code{channel}: A logical (or binary) vector indicating overland channel routing.}
+#'     \item{\code{outlet_backlog}: A list vector indicating channel backlog of outlet cells from a previous simulation.}
 #'   }
-#' @param SpParams A data frame with species parameters (see \code{\link[medfate]{SpParamsMED}}).
+#' @param SpParams A data frame with species parameters (see \code{\link[medfate]{SpParamsMED}}). IMPORTANT: If \code{sf} has been already initialized, this parameter has no effect.
 #' @param meteo Input meteorological data (see \code{\link{spwb_spatial}} and details).
 #' @param dates A \code{\link{Date}} object describing the days of the period to be modeled.
 #' @param CO2ByYear A named numeric vector with years as names and atmospheric CO2 concentration (in ppm) as values. Used to specify annual changes in CO2 concentration along the simulation (as an alternative to specifying daily values in \code{meteo}).
-#' @param summary_frequency Frequency in which cell summary will be produced (e.g. "years", "months", ...) (see \code{\link{cut.Date}}).
-#'                          In \code{fordyn_land} summaries are always produced at monthly resolution. 
+#' @param summary_frequency Frequency in which cell summary will be produced (e.g. "years", "months", "weeks", ...) (see \code{\link{cut.Date}}).
+#'                          In \code{fordyn_land} summary frequency can only be "months" or "years". 
+#' @param summary_blocks A character vector with variable blocks for cell summaries (or \code{NULL} to retain only basic summaries). Accepted summary blocks for \code{spwb_land} are "WaterBalance" and "Stand". For \code{growth_land} and \code{fordyn_land}, "CarbonBalance" and "BiomassBalance" are also accepted.  
 #' @param local_control A list of control parameters (see \code{\link[medfate]{defaultControl}}) for function \code{\link[medfate]{spwb_day}} or \code{\link[medfate]{growth_day}}. By default,
-#'                      parameter \code{soilDomains} is set to \code{"single"}, meaning a single-domain Richards model.
+#'                      parameter \code{soilDomains} is set to \code{"single"}, meaning a single-domain Richards model. IMPORTANT: If \code{sf} has been already initialized, this parameter has no effect.
 #' @param watershed_control A list of watershed control parameters (see \code{\link{default_watershed_control}}). Importantly, the sub-model used
 #'                          for lateral water flows - either \enc{Francés}{Frances} et al. (2007) or \enc{Caviedes-Voullième}{Caviedes-Voullieme} et al. (2023) - is specified there.
 #' @param management_function A function that implements forest management actions (see \code{\link[medfate]{fordyn}}).
 #' of such lists, one per spatial unit.
-#' @param parallelize Boolean flag to try parallelization (see details).
+#' @param parallelize Boolean flag to try parallelization (only works with subwatersheds, see details).
 #' @param num_cores Integer with the number of cores to be used for parallel computation (by default it will use all clusters minus one).
-#' @param chunk_size Integer indicating the size of chunks to be sent to different processes (by default, the number of spatial elements divided by the number of cores).
 #' @param progress Boolean flag to display progress information for simulations.
 #'  
 #' @return Functions \code{spwb_land}, \code{growth_land} and \code{fordyn_land} return a list of class of the same name as the function with the following elements:
@@ -1202,33 +1486,13 @@
 #'        \item{\code{state}: A list of model input objects for each simulated stand.}
 #'        \item{\code{aquifer}: A numeric vector with the water volume in the aquifer of each cell.}
 #'        \item{\code{snowpack}: A numeric vector with the snowpack water equivalent volume of each cell.}
-#'        \item{\code{summary}: A list of cell summaries, containing the following variables:
+#'        \item{\code{summary}: A list of cell summaries containing at least the following variables (additional variables are summarized using \code{summary_blocks}):
 #'         \itemize{
 #'           \item{\code{MinTemperature}: Minimum temperature (degrees Celsius).}
 #'           \item{\code{MaxTemperature}: Maximum temperature (degrees Celsius).}
 #'           \item{\code{PET}: Potential evapotranspiration (in mm).}
 #'           \item{\code{Rain}: Rainfall (in mm).}
 #'           \item{\code{Snow}: Snowfall (in mm).}
-#'           \item{\code{Snowmelt}: Snow melt (in mm).}
-#'           \item{\code{Interception}: Rainfall interception (in mm).}
-#'           \item{\code{NetRain}: Net rainfall, i.e. throughfall, (in mm).}
-#'           \item{\code{Infiltration}: The amount of water infiltrating into the soil (in mm).}
-#'           \item{\code{InfiltrationExcess}: The amount of water exceeding the soil infiltration capacity (in mm).}
-#'           \item{\code{SaturationExcess}: The amount of water that reaches the soil surface because of soil saturation (in mm).}
-#'           \item{\code{Runon}: The amount of water reaching the cell via surface runon (in mm).}
-#'           \item{\code{Runoff}: The amount of water exported from the cell via surface runoff (in mm).}
-#'           \item{\code{DeepDrainage}: The amount of water draining from soil to the aquifer via deep drainage (in mm).}
-#'           \item{\code{CapillarityRise}: Water entering the soil via capillarity rise (mm) from the water table.}
-#'           \item{\code{SoilEvaporation}: Bare soil evaporation (in mm).}
-#'           \item{\code{Transpiration}: Woody plant transpiration (in mm).}
-#'           \item{\code{HerbTranspiration}: Herbaceous transpiration (in mm).}
-#'           \item{\code{InterflowInput}: The amount of water that reaches the soil of the cell from adjacent cells via subsurface flow (in mm).}
-#'           \item{\code{InterflowOutput}: The amount of water that leaves the soil of the cell towards adjacent cells via subsurface flow (in mm).}
-#'           \item{\code{InterflowBalance}: The balance of water circulating via subsurface flow (in mm).}
-#'           \item{\code{BaseflowInput}: The amount of water that reaches the aquifer of the cell from adjacent cells via groundwater flow (in mm).}
-#'           \item{\code{BaseflowOutput}: The amount of water that leaves the aquifer of the cell towards adjacent cells via groundwater flow (in mm).}
-#'           \item{\code{BaseflowBalance}: The balance of water circulating via groundwater flow (in mm).}
-#'           \item{\code{AquiferExfiltration}: The amount of water of the cell that generates surface runoff due to the aquifer reaching the soil surface (in mm).}
 #'           \item{\code{SWE}: Snow water equivalent (in mm) of the snowpack.}
 #'           \item{\code{RWC}: Soil relative water content with respect to field capacity (in percent).}
 #'           \item{\code{SoilVol}: Soil water volume integrated across vertical layers (in mm).}
@@ -1238,6 +1502,7 @@
 #'       }
 #'       \item{\code{result}: A list of cell detailed results (only for those indicated in the input), with contents depending on the local model.}
 #'       \item{\code{outlet}: A logical vector indicating outlet cells.}
+#'       \item{\code{outlet_backlog}: A list vector indicating channel backlog of outlet cells (for subsequent simulations).}
 #'     }
 #'     In function \code{fordyn_land} the \code{\link[sf]{sf}} object contains additional columns:
 #'     \itemize{
@@ -1251,21 +1516,16 @@
 #'        \item{\code{cut_shrub_table}: A list of data frames for each simulated stand, containing the cut shrub at each time step.}
 #'     }
 #'   }
-#'   \item{\code{overland_routing}: A list with three items describing overland routing parameters:
-#'     \itemize{
-#'       \item{\code{waterOrder}: A vector with the cell's processing order for overland routing (based on elevation).}
-#'       \item{\code{queenNeigh}: A list where, for each cell, a vector gives the identity of neighbours (up to eight).}
-#'       \item{\code{waterQ}: A list where, for each cell, a vector gives the proportion of overland flow to each neighbour.}
-#'     }
-#'   }
-#'   \item{\code{watershed_balance}: A data frame with as many rows as days and where columns are components of the water balance at the watershed level (i.e., rain, snow, interception, infiltration, soil evaporation, plant transpiration, ...).}
-#'   \item{\code{watershed_soil_balance}: A data frame with as many rows as days and where columns are components of the water balance at the watershed level restricted to those cells with a soil definition.}
-#'   \item{\code{outlet_export_m3s}: A matrix with daily values of runoff (in m3/s) reaching each of the outlet cells of the landscape. Each outlet drains its own subset of cells, so the 
-#'                                   overall watershed export corresponds to the sum of row values.}
+#'   \item{\code{watershed_balance}: A data frame with as many rows as days and where columns are (spatially-averaged) components of the water balance at the watershed level (i.e., rain, snow, interception, infiltration, soil evaporation, plant transpiration, ...).}
+#'   \item{\code{watershed_soil_balance}: A data frame with as many rows as days and where columns are (spatially-averaged) components of the water balance at the watershed level restricted to those cells with a soil definition.}
+#'   \item{\code{channel_export_m3s}: A matrix with daily values of runoff (in m3/s) reaching each of the channel cells of the landscape (useful for channel processing with an external model).}
+#'   \item{\code{outlet_export_m3s}: A matrix with daily values of runoff (in m3/s) reaching each of the outlet cells of the landscape. Each outlet drains its own subset of cells (sometimes including channel routing), so the 
+#'                                   daily overall watershed export corresponds to the sum of row values.}
 #' }
 #' 
 #' @details
-#' The default \code{soilDomains = "single"} means that vertical bulk soil flows are simulated using a single permeability domain with Richards equation.
+#' IMPORTANT: Simulation function will normally call the initialization of state variables via an internal call to \code{\link{initialize_landscape}}, using parameters \code{local_control} and \code{SpParams} in this call. The default \code{soilDomains = "single"} means that vertical bulk soil flows are simulated using a single permeability domain with Richards equation.
+#' However, if object \code{sf} has been previously initialized, then the control parameters of this previous initialization will remain the same. In other words, parameters \code{local_control} and \code{SpParams} will have no effect in the call to the simulation routines if the \code{sf} has been previously initialized.
 #' 
 #' Two sub-models are available for lateral water transfer processes (overland flow, sub-surface flow, etc.), either "TETIS" 
 #' (similar to \enc{Francés}{Frances} et al. 2007) or "SERGHEI" (\enc{Caviedes-Voullième}{Caviedes-Voullieme} et al. 2023).
@@ -1276,9 +1536,7 @@
 #' When running \code{fordyn_land}, the input 'sf' object has to be in a Universal Transverse Mercator (UTM) coordinate system (or any other projection using meters as length unit)
 #' for appropriate behavior of dispersal sub-model.
 #'
-#' Parallel computation is only recommended for watersheds with large number of grid cells (e.g. > 10,000 when using \code{transpirationMode = "granier"}).
-#' In watershed with a small number of cells, parallel computation can result in larger processing times than sequential computation, due
-#' to the communication overload.
+#' Due to the large communication overload, parallel computation is only allowed for TETIS in combination with definition of subwatersheds (see flag of TETIS parameters in \code{\link{default_watershed_control}}).
 #' 
 #' When dealing with large data sets, weather data included in the 'sf' object will likely be very data hungry. In those cases, it is 
 #' recommended to resort on weather interpolation (see \code{\link{spwb_spatial}}). Weather interpolation can be done using a coarser resolution
@@ -1293,7 +1551,8 @@
 #' 
 #' Mario \enc{Morales-Hernández}{Morales-Hernandez}, Universidad de Zaragoza.
 #' 
-#' @seealso \code{\link{default_watershed_control}}, \code{\link{initialize_landscape}}, \code{\link{spwb_land_day}}, \code{\link[medfate]{spwb_day}},  \code{\link[medfate]{growth_day}},
+#' @seealso \code{\link{default_watershed_control}}, \code{\link{initialize_landscape}}, \code{\link{overland_routing}},
+#' \code{\link{spwb_land_day}}, \code{\link[medfate]{spwb_day}},  \code{\link[medfate]{growth_day}},
 #' \code{\link{spwb_spatial}}, \code{\link{fordyn_spatial}}, \code{\link{dispersal}}
 #' 
 #' @references 
@@ -1359,38 +1618,42 @@
 #' @export
 spwb_land<-function(r, sf, SpParams, meteo= NULL, dates = NULL,
                     CO2ByYear = numeric(0), 
+                    summary_blocks = NULL,
                     summary_frequency = "years",
                     local_control = defaultControl(soilDomains = "single"),
                     watershed_control = default_watershed_control(),
-                    parallelize = FALSE, num_cores = detectCores()-1, chunk_size = NULL, 
+                    parallelize = FALSE, num_cores = parallel::detectCores()-1, 
                     progress = TRUE) {
   if(progress) cli::cli_h1(paste0("Simulation of model 'spwb' over a watershed"))
   return(.simulate_land("spwb_land",
                         r = r, y = sf, SpParams = SpParams, meteo = meteo, dates = dates,
                         CO2ByYear = CO2ByYear,
                         summary_frequency = summary_frequency, 
+                        summary_blocks = summary_blocks,
                         local_control = local_control,
                         watershed_control = watershed_control, 
-                        parallelize = parallelize, num_cores = num_cores, chunk_size = chunk_size,
+                        parallelize = parallelize, num_cores = num_cores,
                         progress = progress, header_footer = progress))
 }
 #' @rdname spwb_land
 #' @export
 growth_land<-function(r, sf, SpParams, meteo = NULL, dates = NULL,
                       CO2ByYear = numeric(0), 
+                      summary_blocks = NULL,
                       summary_frequency = "years",
                       local_control = medfate::defaultControl(soilDomains = "single"),
                       watershed_control = default_watershed_control(),
-                      parallelize = FALSE, num_cores = detectCores()-1, chunk_size = NULL, 
+                      parallelize = FALSE, num_cores = parallel::detectCores()-1,
                       progress = TRUE) {
   if(progress) cli::cli_h1(paste0("Simulation of model 'growth' over a watershed"))
   return(.simulate_land("growth_land",
                         r = r, y = sf, SpParams = SpParams, meteo = meteo, dates = dates,
                         CO2ByYear = CO2ByYear,
+                        summary_blocks = summary_blocks, 
                         summary_frequency = summary_frequency, 
                         local_control = local_control,
                         watershed_control = watershed_control, 
-                        parallelize = parallelize, num_cores = num_cores, chunk_size = chunk_size,
+                        parallelize = parallelize, num_cores = num_cores,
                         progress = progress, header_footer = progress))
 }
 
@@ -1399,15 +1662,29 @@ growth_land<-function(r, sf, SpParams, meteo = NULL, dates = NULL,
 #' @export
 fordyn_land <- function(r, sf, SpParams, meteo = NULL, dates = NULL,
                         CO2ByYear = numeric(0), 
+                        summary_blocks = NULL,
+                        summary_frequency = "years",
                         local_control = medfate::defaultControl(soilDomains = "single"),
                         watershed_control = default_watershed_control(),
                         dispersal_control = default_dispersal_control(),
                         management_function = NULL,
-                        parallelize = FALSE, num_cores = parallel::detectCores()-1, chunk_size = NULL, 
+                        parallelize = FALSE, num_cores = parallel::detectCores()-1, 
                         progress = TRUE) {
   
   #watershed model
   watershed_model <- watershed_control$watershed_model
+  summary_frequency <- match.arg(summary_frequency, c("months", "years"))
+  
+  # Summary flags
+  waterBalanceSummary <- "WaterBalance" %in% summary_blocks
+  standSummary <- "Stand" %in% summary_blocks
+  carbonBalanceSummary <- "CarbonBalance" %in% summary_blocks
+  biomassBalanceSummary <- "BiomassBalance" %in% summary_blocks
+  
+  varsSum <- .vars_summary("sum", standSummary = standSummary, waterBalanceSummary = waterBalanceSummary, carbonBalanceSummary = carbonBalanceSummary, biomassBalanceSummary = biomassBalanceSummary)
+  varsMean <- .vars_summary("mean", standSummary = standSummary, waterBalanceSummary = waterBalanceSummary, carbonBalanceSummary = carbonBalanceSummary, biomassBalanceSummary = biomassBalanceSummary)
+  varsState <- .vars_summary("state", standSummary = standSummary, waterBalanceSummary = waterBalanceSummary, carbonBalanceSummary = carbonBalanceSummary, biomassBalanceSummary = biomassBalanceSummary)
+  
   watershed_model <- match.arg(watershed_model, c("tetis", "serghei"))
   
   if(progress) cli::cli_h1(paste0("Simulation of model 'fordyn' over a watershed"))
@@ -1415,17 +1692,11 @@ fordyn_land <- function(r, sf, SpParams, meteo = NULL, dates = NULL,
   #check input
   
   if(progress) cli::cli_progress_step(paste0("Checking topology"))
-  if(!inherits(r, "SpatRaster")) cli::cli_abort("'r' has to be of class 'SpatRaster'.")
-  if(!inherits(sf, "sf")) cli::cli_abort("'sf' has to be of class 'sf'.")
-  if(sf::st_crs(sf)!=sf::st_crs(r)) cli::cli_abort("'sf' and 'r' need to have the same CRS.")
-  sf_coords <- sf::st_coordinates(sf)
-  sf2cell <- terra::cellFromXY(r, sf_coords)
-  if(any(is.na(sf2cell))) cli::cli_abort("Some coordinates are outside the raster definition.")
-  if(length(sf2cell)!=length(unique(sf2cell))) cli::cli_abort("Only one element in 'sf' is allowed per cell in 'r'.")
+  raster_matching <- .raster_sf_matching(r, sf)
+  sf_coords <- raster_matching$sf_coords
+  sf2cell <- raster_matching$sf2cell
+  cell2sf <- raster_matching$cell2sf
   nrastercells <- prod(dim(r)[1:2])
-  cell2sf <- rep(NA, nrastercells)
-  for(i in 1:length(sf2cell)) cell2sf[sf2cell[i]] <- i
-  
 
   if(progress) cli::cli_progress_step(paste0("Checking 'sf' data"))
   .check_sf_input(sf)
@@ -1491,6 +1762,11 @@ fordyn_land <- function(r, sf, SpParams, meteo = NULL, dates = NULL,
     cli::cli_li(paste0("Cell land use wildland: ", nWild, " agriculture: ", nAgri, " artificial: ", nArti, " rock: ", nRock, " water: ", nWater))
     cli::cli_li(paste0("Cells with soil: ", nSoil))
     cli::cli_li(paste0("Number of years to simulate: ",nYears))
+    if(is.null(management_function)) {
+      cli::cli_li("Forest management process not considered.")
+    } else {
+      cli::cli_li("Forest management process included.")
+    }
     if(is.null(dispersal_control)) {
       cli::cli_li("Seed dispersal process not considered.")
     } else {
@@ -1519,10 +1795,10 @@ fordyn_land <- function(r, sf, SpParams, meteo = NULL, dates = NULL,
   
   LandscapeBalance <- NULL 
   SoilLandscapeBalance <- NULL
+  ChannelExport_m3s <- NULL
   OutletExport_m3s <- NULL
   cell_summary <- NULL
-  overland_routing <- NULL
-  
+
   #initial tree/shrub tables
   if(progress) cli::cli_progress_step("Initializing 'fordyn' output tables")
   treeTableVec <- vector("list", nCells)
@@ -1558,30 +1834,38 @@ fordyn_land <- function(r, sf, SpParams, meteo = NULL, dates = NULL,
                          r = r, y = sf, SpParams = SpParams, meteo = meteo, dates = datesYear,
                          CO2ByYear = CO2ByYear,
                          summary_frequency = "month", # Summary frequency to use statistics
+                         summary_blocks = summary_blocks,
                          local_control = local_control,
                          watershed_control = watershed_control, 
-                         parallelize = parallelize, num_cores = num_cores, chunk_size = chunk_size, 
+                         parallelize = parallelize, num_cores = num_cores, 
                          progress = progress, header_footer = FALSE)
     
     # Store snowpack and aquifer state
     sf$aquifer <- GL$sf$aquifer
     sf$snowpack <- GL$sf$snowpack
     
-    # Store overland routing
-    if(!is.null(overland_routing)) overland_routing <- GL$overland_routing
-    
     #Store landscape and cell summaries
+    cell_summary_i <- GL$sf$summary
+    
+    if(summary_frequency=="years") {
+      for(i in 1:nCells) {
+        cell_summary_i[[i]] <- .aggregate_summary_to_annual(cell_summary_i[[i]], 
+                                                            varsSum, varsMean, varsState)
+      }
+    }
     if(iYear==1) {
+      ChannelExport_m3s <- GL$channel_export_m3s
       OutletExport_m3s <- GL$outlet_export_m3s
       LandscapeBalance <- GL$watershed_balance
       SoilLandscapeBalance <- GL$watershed_soil_balance
-      cell_summary <- GL$sf$summary
+      cell_summary <- cell_summary_i
     } else {
+      ChannelExport_m3s <- rbind(ChannelExport_m3s, GL$channel_export_m3s)
       OutletExport_m3s <- rbind(OutletExport_m3s, GL$outlet_export_m3s)
       LandscapeBalance <- rbind(LandscapeBalance, GL$watershed_balance)
       SoilLandscapeBalance <- rbind(SoilLandscapeBalance, GL$watershed_soil_balance)
       for(i in 1:nCells) { 
-        cell_summary[[i]] <- rbind(cell_summary[[i]], GL$sf$summary[[i]])
+        cell_summary[[i]] <- rbind(cell_summary[[i]],cell_summary_i[[i]])
       }
     }
     
@@ -1642,8 +1926,8 @@ fordyn_land <- function(r, sf, SpParams, meteo = NULL, dates = NULL,
         cutShrubTableYear <- NULL
         management_result <- NULL
         planted_forest <- emptyforest()
-        if(!is.null(management_function) && ("management_args" %in% names(sf))) {
-          management_args <- sf$management_args[[i]]
+        if(!is.null(management_function) && ("management_arguments" %in% names(sf))) {
+          management_args <- sf$management_arguments[[i]]
           if(!is.null(management_args)) {
             management_result <- do.call(management_function, list(x = forest, args= management_args, verbose = FALSE))
             # Update forest and xo objects
@@ -1674,7 +1958,7 @@ fordyn_land <- function(r, sf, SpParams, meteo = NULL, dates = NULL,
             }
           
             # Store new management arguments (may have changed)
-            sf$management_args[[i]] <- management_result$management_args
+            sf$management_arguments[[i]] <- management_result$management_args
           }
         }
         # 3.1 Simulate species local recruitment
@@ -1730,7 +2014,7 @@ fordyn_land <- function(r, sf, SpParams, meteo = NULL, dates = NULL,
   out_sf$snowpack <- sf$snowpack
   out_sf$summary <- cell_summary
   out_sf$forest <- sf$forest
-  if("management_args" %in% names(sf)) out_sf$management_arguments <- sf$management_arguments
+  if("management_arguments" %in% names(sf)) out_sf$management_arguments <- sf$management_arguments
   out_sf$tree_table <- treeTableVec
   out_sf$shrub_table <- shrubTableVec
   out_sf$dead_tree_table <- deadTreeTableVec
@@ -1739,35 +2023,20 @@ fordyn_land <- function(r, sf, SpParams, meteo = NULL, dates = NULL,
   out_sf$cut_shrub_table <- cutShrubTableVec
   l <- list(watershed_control = watershed_control,
             sf = sf::st_as_sf(tibble::as_tibble(out_sf)),
-            overland_routing = overland_routing,
             watershed_balance = LandscapeBalance,
             watershed_soil_balance = SoilLandscapeBalance,
+            channel_export_m3s = ChannelExport_m3s,
             outlet_export_m3s = OutletExport_m3s)
   class(l)<-c("fordyn_land", "list")
   return(l)
 }
 
-#' @rdname spwb_land
-#' @export
-cell_neighbors<-function(sf, r) {
-  if(!inherits(sf, "sf"))  cli::cli_abort("Object 'sf' has to be of class 'sf'")
-  if(!inherits(r, "SpatRaster")) cli::cli_abort("'r' has to be of class 'SpatRaster'.")
-  if(sf::st_crs(sf)!=sf::st_crs(r)) cli::cli_abort("'sf' and 'r' need to have the same CRS.")
-  sf_coords <- sf::st_coordinates(sf)
-  sf2cell <- terra::cellFromXY(r, sf_coords)
-  if(any(is.na(sf2cell))) cli::cli_abort("Some coordinates are outside the raster definition.")
-  if(length(sf2cell)!=length(unique(sf2cell))) cli::cli_abort("Only one element in 'sf' is allowed per cell in 'r'.")
-  nrastercells <- prod(dim(r)[1:2])
-  cell2sf <- rep(NA, nrastercells)
-  for(i in 1:length(sf2cell)) cell2sf[sf2cell[i]] <- i
-  return(.neighFun(r, sf2cell, cell2sf))
-}
 
 .simulate_land_day<-function(land_model = "spwb_land_day", 
                              r, y, SpParams, meteo, date,
                              local_control = medfate::defaultControl(),
                              watershed_control = default_watershed_control(),
-                             parallelize = parallelize, num_cores = num_cores, chunk_size = chunk_size,
+                             parallelize = FALSE, num_cores = detectCores()-1, 
                              progress = TRUE, header_footer = progress) {
   
   #land (local) model
@@ -1787,17 +2056,12 @@ cell_neighbors<-function(sf, r) {
   #check input
   
   if(header_footer) cli::cli_progress_step(paste0("Checking topology"))
-  if(!inherits(r, "SpatRaster")) cli::cli_abort("'r' has to be of class 'SpatRaster'.")
-  if(!inherits(y, "sf")) cli::cli_abort("'sf' has to be of class 'sf'.")
-  if(sf::st_crs(y)!=sf::st_crs(r)) cli::cli_abort("'sf' and 'r' need to have the same CRS.")
-  sf_coords <- sf::st_coordinates(y)
-  sf2cell <- terra::cellFromXY(r, sf_coords)
-  if(any(is.na(sf2cell))) cli::cli_abort("Some coordinates are outside the raster definition.")
-  if(length(sf2cell)!=length(unique(sf2cell))) cli::cli_abort("Only one element in 'sf' is allowed per cell in 'r'.")
+  raster_matching <- .raster_sf_matching(r, y)
+  sf_coords <- raster_matching$sf_coords
+  sf2cell <- raster_matching$sf2cell
+  cell2sf <- raster_matching$cell2sf
   nrastercells <- prod(dim(r)[1:2])
-  cell2sf <- rep(NA, nrastercells)
-  for(i in 1:length(sf2cell)) cell2sf[sf2cell[i]] <- i
-  
+
   if(header_footer) cli::cli_progress_step(paste0("Checking 'sf' data"))
   .check_sf_input(y)
   if(!("snowpack" %in% names(y))) cli::cli_abort("'snowpack' has to be defined in 'y'.")
@@ -1847,29 +2111,11 @@ cell_neighbors<-function(sf, r) {
   # TETIS: Build/check neighbours
   if(watershed_model=="tetis") {
     if(header_footer) cli::cli_progress_step(paste0("Determining neighbors and discharge for TETIS"))
-    
-    waterOrder <- order(y$elevation, decreasing=TRUE)
-    queenNeigh <- .neighFun(r, sf2cell, cell2sf)
-    waterQ <- .waterQFun(queenNeigh, sf_coords, y$elevation)
-    #Determine outlet cells (those without downhill neighbors)
-    isOutlet <- (unlist(lapply(waterQ, sum))==0)
-    outlets <- which(isOutlet)
-    # Check
-    for(i in 1:nCells) { 
-      ni <- queenNeigh[[i]]
-      qi <- waterQ[[i]]
-      if(max(ni)>nCells || min(ni) < 1) {
-        cli::cli_abort(paste0("Cell ", i, " pointed to non-existing neighbors"))
-      }
-      if(length(qi) != length(ni)) {
-        cli::cli_abort(paste0("Cell ", i, " has different number of neighbors in 'waterQ' than 'queenNeigh'"))
-      }
-      if(!isOutlet[i]) {
-        if(abs(sum(qi) - 1) > 0.0001) {
-          cli::cli_abort(paste0("'waterQ' values for cell ", i, " do not add up to 1"))
-        }
-      }
-    }
+    sf_routing <- .overland_routing_inner(r, y, 
+                                          raster_matching = raster_matching, 
+                                          channel_flow_speed = watershed_control$tetis_parameters$channel_flow_speed, 
+                                          patchsize = patchsize)
+    outlets <- which(sf_routing$outlet)
   }
   if(header_footer) cli::cli_progress_done()
   
@@ -1884,7 +2130,10 @@ cell_neighbors<-function(sf, r) {
     cli::cli_li(paste0("Cell land use wildland: ", nWild, " agriculture: ", nAgri, " artificial: ", nArti, " rock: ", nRock, " water: ", nWater))
     cli::cli_li(paste0("Cells with soil: ", nSoil))
     cli::cli_li(paste0("Number of cells with daily model results requested: ", sum(y$result_cell)))
-    if(watershed_model=="tetis") cli::cli_li(paste0("Number of outlet cells: ", length(outlets)))
+    if(watershed_model=="tetis") {
+      cli::cli_li(paste0("Number of channel cells: ", sum(sf_routing$channel)))
+      cli::cli_li(paste0("Number of outlet cells: ", sum(sf_routing$outlet)))
+    }
     if(!is.null(meteo)) if(inherits(meteo, "stars") || inherits(meteo, "list")) cli::cli_li(paste0("Weather interpolation factor: ", watershed_control[["weather_aggregation_factor"]]))
   }
   
@@ -1944,22 +2193,18 @@ cell_neighbors<-function(sf, r) {
                                      meteo_mapping,
                                      datesStarsList)
 
-  ws_day  <- .createDayOutput(nCells)
+  ws_day  <- .createDayOutput(nCells, FALSE, FALSE, FALSE)
   
   if(watershed_model=="tetis") {
     .watershedDayTetis(output = ws_day,
                        internalCommunication = internalCommunication,
                        local_model = local_model,
                        y = y,
-                       waterOrder = waterOrder, 
-                       queenNeigh = queenNeigh, 
-                       waterQ = waterQ,
+                       sf_routing = sf_routing,
                        watershed_control = watershed_control,
                        date = datechar,
                        gridMeteo = gridMeteo,
                        latitude = latitude,
-                       parallelize = parallelize, num_cores = num_cores, 
-                       chunk_size = chunk_size,
                        patchsize = patchsize, 
                        progress = progress)
   } else if(watershed_model=="serghei") {
@@ -1972,7 +2217,6 @@ cell_neighbors<-function(sf, r) {
                                    date = datechar,
                                    gridMeteo = gridMeteo,
                                    latitude = latitude, elevation = y$elevation, slope = y$slope, aspect = y$aspect,
-                                   parallelize = parallelize, num_cores = num_cores, chunk_size = chunk_size,
                                    progress = FALSE)
     .finishSerghei()
   }
@@ -1986,7 +2230,10 @@ cell_neighbors<-function(sf, r) {
   for(i in 1:nCells) {
     if(y$result_cell[i]) res$result[[i]] <- ws_day$LocalResults[[i]]$simulation_results
   }
-  if(watershed_model=="tetis") res$outlet <- isOutlet
+  if(watershed_model=="tetis")  {
+    res$outlet <- sf_routing$outlet
+    res$outlet_backlog <- sf_routing$outlet_backlog
+  }
   wb <- ws_day$WatershedWaterBalance
   for(n in names(wb)) res[[n]] <- wb[[n]]
   return(sf::st_sf(tibble::as_tibble(res)))
@@ -2012,9 +2259,6 @@ cell_neighbors<-function(sf, r) {
 #' @param local_control A list of control parameters (see \code{\link[medfate]{defaultControl}}) for function \code{\link[medfate]{spwb_day}} or \code{\link[medfate]{growth_day}}.
 #' @param watershed_control A list of watershed control parameters (see \code{\link{default_watershed_control}}). Importantly, the sub-model used
 #'                          for lateral water flows - either \enc{Francés}{Frances} et al. (2007) or \enc{Caviedes-Voullième}{Caviedes-Voullieme} et al. (2023) - is specified there.
-#' @param parallelize Boolean flag to try parallelization (see details).
-#' @param num_cores Integer with the number of cores to be used for parallel computation (by default it will use all clusters minus one).
-#' @param chunk_size Integer indicating the size of chunks to be sent to different processes (by default, the number of spatial elements divided by the number of cores).
 #' @param progress Boolean flag to display progress information for simulations.
 #'  
 #' @return Functions \code{spwb_land_day} and \code{spwb_land_day} return a sf object:
@@ -2024,7 +2268,8 @@ cell_neighbors<-function(sf, r) {
 #'    \item{\code{aquifer}: A numeric vector with the water volume in the aquifer of each cell.}
 #'    \item{\code{snowpack}: A numeric vector with the snowpack water equivalent volume of each cell.}
 #'    \item{\code{result}: A list of cell detailed results (only for those indicated in the input), with contents depending on the local model.}
-#'    \item{\code{outlet}: A logical vector indicating outlet cells.}
+#'    \item{\code{outlet}: A logical vector indicating outlet cells (for subsequent simulations).}
+#'    \item{\code{outlet_backlog}: A list vector indicating channel backlog of outlet cells.}
 #'    \item{\code{MinTemperature}: Minimum temperature (degrees Celsius).}
 #'    \item{\code{MaxTemperature}: Maximum temperature (degrees Celsius).}
 #'    \item{\code{PET}: Potential evapotranspiration (in mm).}
@@ -2052,7 +2297,7 @@ cell_neighbors<-function(sf, r) {
 #'  }
 #' 
 #' @details
-#' See details in \code{\link{spwb_land}}.
+#' See details in \code{\link{spwb_land}}. Subwatershed units and parallelization are not possible, at present, for single-day watershed simulations.
 #' 
 #' @author 
 #' Miquel De \enc{Cáceres}{Caceres} Ainsa, CREAF.
@@ -2109,13 +2354,11 @@ cell_neighbors<-function(sf, r) {
 spwb_land_day<-function(r, sf, SpParams, meteo= NULL, date = NULL,
                         local_control = medfate::defaultControl(soilDomains = "single"),
                         watershed_control = default_watershed_control(),
-                        parallelize = FALSE, num_cores = parallel::detectCores()-1, chunk_size = NULL, 
                         progress = TRUE) {
   return(.simulate_land_day("spwb_land_day",
                             r = r, y = sf, SpParams = SpParams, meteo = meteo, date = date,
                             local_control = local_control,
                             watershed_control = watershed_control, 
-                            parallelize = parallelize, num_cores = num_cores, chunk_size = chunk_size,
                             progress = progress, header_footer = progress))
 }
 #' @rdname spwb_land_day
@@ -2123,13 +2366,11 @@ spwb_land_day<-function(r, sf, SpParams, meteo= NULL, date = NULL,
 growth_land_day<-function(r, sf, SpParams, meteo= NULL, date = NULL,
                           local_control = medfate::defaultControl(soilDomains = "single"),
                           watershed_control = default_watershed_control(),
-                          parallelize = FALSE, num_cores = parallel::detectCores()-1, chunk_size = NULL, 
                           progress = TRUE) {
   return(.simulate_land_day("growth_land_day",
                             r = r, y = sf, SpParams = SpParams, meteo = meteo, date = date,
                             local_control = local_control,
                             watershed_control = watershed_control, 
-                            parallelize = parallelize, num_cores = num_cores, chunk_size = chunk_size,
                             progress = progress, header_footer = progress))
 }
 
