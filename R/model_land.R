@@ -268,8 +268,7 @@
   isOutlet <- sf_routing$outlet
   target_outlet <- sf_routing$target_outlet
   distance_to_outlet <- sf_routing$distance_to_outlet
-  outlet_backlog <- sf_routing$outlet_backlog
-  
+
   # Reset from previous days
   .resetWaterBalanceDayOutput(output[["WatershedWaterBalance"]])
   
@@ -293,87 +292,25 @@
                                       patchsize)
   
   
-  # B1. Weather and local flows
+  # B. Simulation of soil cells, non-soil cells and overland flows
   .copySnowpackToSoil(y)
-  .tetisModifyKsat(y, watershed_control, FALSE)
-  tminVec <- gridMeteo[["MinTemperature"]]
-  tmaxVec <- gridMeteo[["MaxTemperature"]]
-  rhminVec <- gridMeteo[["MinRelativeHumidity"]]
-  rhmaxVec <- gridMeteo[["MaxRelativeHumidity"]]
-  precVec <- gridMeteo[["Precipitation"]]
-  radVec <- gridMeteo[["Radiation"]]
-  wsVec <- gridMeteo[["WindSpeed"]]
-  C02Vec <- gridMeteo[["CO2"]]
-  
-  # B2. Simulation of non-soil cells
-  .tetisSimulationNonSoilCells(output[["WatershedWaterBalance"]],
-                               y,
-                               tminVec, tmaxVec, precVec, radVec,
-                               waterOrder, queenNeigh, waterQ, isChannel,
-                               watershed_control)
-  
-  # B3. Simulation of soil cells
-  outWB <- output[["WatershedWaterBalance"]]
-  XI <- vector("list", nX)
-  for(i in 1:nX) {
-    if(y$land_cover_type[i] %in% c("wildland", "agriculture")) {
-      meteovec <- c(
-        "MinTemperature" = tminVec[i],
-        "MaxTemperature" = tmaxVec[i],
-        "MinRelativeHumidity" = rhminVec[i],
-        "MaxRelativeHumidity" = rhmaxVec[i],
-        "Precipitation"  =precVec[i],
-        "Radiation" = radVec[i],
-        "WindSpeed" = wsVec[i],
-        "CO2" = C02Vec[i]
-      )
-      wtd = y$depth_to_bedrock[i] - (y$aquifer[i]/y$bedrock_porosity[i])
-      if(wtd<0.0) cli::cli_alert_warning(paste0("Negative WTD in ", i,"\n"))
-      xi <- y$state[[i]]
-      soil_i <- xi[["soil"]]
-      widths <- soil_i$widths
-      lambda <- 1 - soil_i$rfc/100
-      w <- (widths*lambda)/sum(widths*lambda)
-      lateralFlows <- outWB$InterflowBalance[i]*w # layer flow
-      XI[[i]] <- list(i = i, 
-                      x = xi,
-                      result_cell = y$result_cell[i],
-                      meteovec = meteovec,
-                      latitude = latitude[i], 
-                      elevation = y$elevation[i], 
-                      slope= y$slope[i], 
-                      aspect = y$aspect[i],
-                      runon = outWB$Runon[i], # Take runon from non-soil cells to input
-                      lateralFlows = lateralFlows,
-                      waterTableDepth = wtd) # // New depth to aquifer (mm)
-    }
-  }
-  localResults <- vector("list", nX)
-  for(i in 1:nX) {
-    if(y$land_cover_type[i] %in% c("wildland", "agriculture")) {
-      localResults[[i]] <- .fcpp_landunit_day(XI[[i]], date = date, model = local_model, 
-                                              internalCommunication = internalCommunication,
-                                              standSummary = standSummary, carbonBalanceSummary = carbonBalanceSummary, 
-                                              biomassBalanceSummary = biomassBalanceSummary)
-    }
-  }
+  .tetisModifyKsat(y, watershed_control, reverse = FALSE)
+  .tetisSimulationWithOverlandFlows(local_model, date, internalCommunication,
+                                    standSummary, carbonBalanceSummary, biomassBalanceSummary,
+                                    output,
+                                    y, 
+                                    latitude,
+                                    gridMeteo,
+                                    waterOrder, queenNeigh, waterQ, isChannel,
+                                    watershed_control)
   .copySnowpackFromSoil(y)
-  .tetisModifyKsat(y, watershed_control, TRUE)
+  .tetisModifyKsat(y, watershed_control, reverse = TRUE)
   
-  #C1. Process results from soil cells
-  .tetisCopySoilResultsToOutput(y, localResults, output,
-                                tminVec, tmaxVec)
-
-  #C2. Overland surface runoff from cells diverted to outlets or channel
-  .tetisOverlandFlows(output[["WatershedWaterBalance"]],
-                      waterOrder, queenNeigh, waterQ, isChannel)
-  
-  
-  #D. Applies capillarity rise, deep drainage to aquifer
+  #C. Applies capillarity rise, deep drainage to aquifer
   .tetisApplyLocalFlowsToAquifer(y,
                                  output[["WatershedWaterBalance"]])
 
-  #E. Applies drainage from aquifer to a deeper aquifer
+  #D. Applies drainage from aquifer to a deeper aquifer
   .tetisApplyDeepAquiferLossToAquifer(output[["WatershedWaterBalance"]], 
                                       y, watershed_control)
 
@@ -633,6 +570,7 @@
     varsBiomassBalance <- .vars_biomassbalance("all")
     
     LandscapeBalance <- data.frame(dates = dates,
+                                   PET = rep(0, nDays),
                                    Precipitation = rep(0, nDays),
                                    Rain = rep(0, nDays),
                                    Snow = rep(0, nDays),
@@ -656,6 +594,7 @@
                                    ChannelExport = rep(0, nDays),
                                    WatershedExport = rep(0, nDays))
     SoilLandscapeBalance <- data.frame(dates = dates,
+                                       PET = rep(0, nDays),
                                        Precipitation = rep(0, nDays),
                                        Rain = rep(0, nDays),
                                        Snow = rep(0, nDays),
@@ -887,6 +826,7 @@
     }
     
     #Landscape balance
+    LandscapeBalance$PET[day] <- sum(res_wb_day$PET, na.rm=T)/nCells
     LandscapeBalance$Rain[day] <- sum(res_wb_day$Rain, na.rm=T)/nCells
     LandscapeBalance$Snow[day] <- sum(res_wb_day$Snow, na.rm=T)/nCells
     LandscapeBalance$Snowmelt[day] <- sum(res_wb_day$Snowmelt, na.rm=T)/nCells
@@ -912,6 +852,7 @@
       LandscapeBalance$WatershedExport[day] <- sum(res_wb_day$WatershedExport, na.rm=T)/nCells
       
       if(nSoil>0) {
+        SoilLandscapeBalance$PET[day] <- sum(res_wb_day$PET[isSoilCell], na.rm=T)/nCells
         SoilLandscapeBalance$Rain[day] <- sum(res_wb_day$Rain[isSoilCell], na.rm=T)/nSoil
         SoilLandscapeBalance$Snow[day] <- sum(res_wb_day$Snow[isSoilCell], na.rm=T)/nSoil
         SoilLandscapeBalance$DeepDrainage[day] <- sum(res_wb_day$DeepDrainage[isSoilCell], na.rm=T)/nSoil
@@ -1199,7 +1140,6 @@
   if(header_footer) cli::cli_progress_step(paste0("Determining neighbors and overland routing for TETIS"))
   sf_routing <- .overland_routing_inner(r, y, 
                                         raster_matching = raster_matching, 
-                                        channel_flow_speed = watershed_control$tetis_parameters$channel_flow_speed, 
                                         patchsize = patchsize,
                                         subwatersheds = watershed_control$tetis_parameters$subwatersheds,
                                         max_overlap = watershed_control$tetis_parameters$max_overlap)
@@ -1246,7 +1186,7 @@
     # SIMULATION
     if(watershed_control$tetis_parameters$subwatersheds) {
       # print(names(sf_routing))
-      subwatersheds <- unique(sf_routing$subwatershed)
+      subwatersheds <- sort(unique(sf_routing$subwatershed))
       sf <- sf::st_sf(geometry=sf::st_geometry(y))
       sf$state <- vector("list", nCells)
       sf$aquifer <- rep(NA, nCells)
@@ -1321,17 +1261,16 @@
         sf$snowpack[sel_subwatershed] <- sf_sub$snowpack
         sf$summary[sel_subwatershed] <- sf_sub$summary
         sf$result[sel_subwatershed] <- sf_sub$result
-        
         watershed_balance_sub <- res_inner_sub$watershed_balance
         watershed_soil_balance_sub <- res_inner_sub$watershed_soil_balance
-        watershed_balance_sub[,-1] <- watershed_balance_sub[,-1]*(nCellsSub/nCells)
-        watershed_soil_balance_sub[,-1] <- watershed_soil_balance_sub[,-1]*(nCellsSub/nCells)
-        if(i==1) {
+        watershed_balance_sub[,-1] <- watershed_balance_sub[,-1, drop = FALSE]*(nCellsSub/nCells)
+        watershed_soil_balance_sub[,-1] <- watershed_soil_balance_sub[,-1, drop = FALSE]*(nCellsSub/nCells)
+        if(i == subwatersheds[1]) {
           LandscapeBalance <- watershed_balance_sub
           SoilLandscapeBalance <- watershed_soil_balance_sub
         } else {
-          LandscapeBalance[,-1] <- LandscapeBalance[,-1] + watershed_balance_sub[,-1]
-          SoilLandscapeBalance[,-1] <- SoilLandscapeBalance[,-1] + watershed_soil_balance_sub[,-1]
+          LandscapeBalance[,-1] <- LandscapeBalance[,-1, drop = FALSE] + watershed_balance_sub[,-1, drop = FALSE]
+          SoilLandscapeBalance[,-1] <- SoilLandscapeBalance[,-1, drop = FALSE] + watershed_soil_balance_sub[,-1, drop = FALSE]
         }
         channel_cells_sub <- channel_cells %in% which(sel_subwatershed)
         outlet_nonchannel_cells_sub <- outlet_nonchannel_cells %in% which(sel_subwatershed)
@@ -1372,7 +1311,7 @@
     # Multiply by patch size to go from m3/m2 to m3 in the whole patch
     OutletExport_m3s[, outlet_non_channel] <- (res_inner$watershed_export/1e3)*patchsize/(3600*24)
     ChannelExport_m3s <- (res_inner$channel_export/1e3)*patchsize/(3600*24)
-    initial_backlog_sum <- (sum(unlist(lapply(sf_routing$outlet_backlog, sum, na.rm= TRUE)))/1e3)*patchsize
+    initial_backlog_sum <- sum(sf_routing$outlet_backlog, na.rm= TRUE)
     initial_outlet_amount <- sum(OutletExport_m3s*(3600*24))
     transport_target <- sum(ChannelExport_m3s*(3600*24))
     if(sum(sf_routing$channel)>0) {
@@ -1386,12 +1325,13 @@
         ChannelExport_vector[channel_cells] <- res_inner$channel_export[day,]
         WatershedExport_vector <- rep(0, nCells)
         .tetisChannelRouting(ChannelExport_vector, WatershedExport_vector,
+                             sf_routing$elevation, sf_routing$slope, 
                              sf_routing$channel, sf_routing$outlet, 
                              sf_routing$target_outlet, sf_routing$distance_to_outlet, sf_routing$outlet_backlog,
                              watershed_control, patchsize)
         OutletExport_m3s[day, ] <- OutletExport_m3s[day,] + (WatershedExport_vector[outlet_cells]/1e3)*patchsize/(3600*24)
       }
-      final_backlog_sum <- (sum(unlist(lapply(sf_routing$outlet_backlog, sum, na.rm= TRUE)))/1e3)*patchsize
+      final_backlog_sum <- sum(sf_routing$outlet_backlog, na.rm= TRUE)
       final_outlet_amount <- sum(OutletExport_m3s*(3600*24))
       if(header_footer) {
         cli::cli_li(paste0("Channel balance target (m3): ", round(transport_target), " outlet change (m3): ", round(final_outlet_amount - initial_outlet_amount), " backlog change (m3): ", round(final_backlog_sum - initial_backlog_sum)))
@@ -1457,7 +1397,7 @@
 #'     \item{\code{aquifer}: A numeric vector with the water content of the aquifer in each cell (in mm). If missing, it will be initialized to zero.}
 #'     \item{\code{deep_aquifer_loss}: A numeric vector with the maximum daily loss to a deeper aquifer (in mm·day-1). If missing all cells take their value from \code{deep_aquifer_loss} in \code{\link{default_watershed_control}}}
 #'     \item{\code{channel}: A logical (or binary) vector indicating overland channel routing.}
-#'     \item{\code{outlet_backlog}: A list vector indicating channel backlog of outlet cells from a previous simulation.}
+#'     \item{\code{outlet_backlog}: A vector indicating, for outlet cells, backlog volume of water (m3) of the corresponding channel network from a previous simulation.}
 #'   }
 #' @param SpParams A data frame with species parameters (see \code{\link[medfate]{SpParamsMED}}). IMPORTANT: If \code{sf} has been already initialized, this parameter has no effect.
 #' @param meteo Input meteorological data (see \code{\link{spwb_spatial}} and details).
@@ -1502,7 +1442,7 @@
 #'       }
 #'       \item{\code{result}: A list of cell detailed results (only for those indicated in the input), with contents depending on the local model.}
 #'       \item{\code{outlet}: A logical vector indicating outlet cells.}
-#'       \item{\code{outlet_backlog}: A list vector indicating channel backlog of outlet cells (for subsequent simulations).}
+#'       \item{\code{outlet_backlog}: A vector indicating channel water volume (m3) backlog of outlet cells (for subsequent simulations).}
 #'     }
 #'     In function \code{fordyn_land} the \code{\link[sf]{sf}} object contains additional columns:
 #'     \itemize{
@@ -1603,10 +1543,10 @@
 #' # Print a summary of water balance components
 #' summary(res)
 #' 
-#' # Option 'simplify = TRUE' in initialization, may be useful to speed up calculations
+#' # Option 'reduce_to_dominant = TRUE' in initialization, may be useful to speed up calculations
 #' example_simplified <- initialize_landscape(example_watershed, SpParams = SpParamsMED,
 #'                                            local_control = defaultControl(soilDomains = "single"), 
-#'                                            simplify = TRUE)
+#'                                            reduce_to_dominant = TRUE)
 #' 
 #' # Launch simulations over simplified landscape (should be considerably faster)
 #' res_simplified <- spwb_land(r, example_simplified, SpParamsMED, examplemeteo, 
@@ -2113,7 +2053,6 @@ fordyn_land <- function(r, sf, SpParams, meteo = NULL, dates = NULL,
     if(header_footer) cli::cli_progress_step(paste0("Determining neighbors and discharge for TETIS"))
     sf_routing <- .overland_routing_inner(r, y, 
                                           raster_matching = raster_matching, 
-                                          channel_flow_speed = watershed_control$tetis_parameters$channel_flow_speed, 
                                           patchsize = patchsize)
     outlets <- which(sf_routing$outlet)
   }
@@ -2269,7 +2208,7 @@ fordyn_land <- function(r, sf, SpParams, meteo = NULL, dates = NULL,
 #'    \item{\code{snowpack}: A numeric vector with the snowpack water equivalent volume of each cell.}
 #'    \item{\code{result}: A list of cell detailed results (only for those indicated in the input), with contents depending on the local model.}
 #'    \item{\code{outlet}: A logical vector indicating outlet cells (for subsequent simulations).}
-#'    \item{\code{outlet_backlog}: A list vector indicating channel backlog of outlet cells.}
+#'    \item{\code{outlet_backlog}: A vector indicating channel water volume (m3) backlog of outlet cells.}
 #'    \item{\code{MinTemperature}: Minimum temperature (degrees Celsius).}
 #'    \item{\code{MaxTemperature}: Maximum temperature (degrees Celsius).}
 #'    \item{\code{PET}: Potential evapotranspiration (in mm).}

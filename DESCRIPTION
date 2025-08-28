@@ -1,8 +1,8 @@
 Package: medfateland
 Type: Package
 Title: Mediterranean Landscape Simulation
-Version: 2.6.0
-Date: 2025-04-23
+Version: 2.7.0
+Date: 2025-08-28
 Authors@R: c(
 	person('Miquel', 'De Cáceres', role=c('aut','cre'),
 	email='miquelcaceres@gmail.com'),
@@ -31,16 +31,18 @@ NeedsCompilation: yes
 LazyData: true
 Config/testthat/edition: 3
 RoxygenNote: 7.3.2
-Packaged: 2025-04-23 13:31:49 UTC; miquel
+Packaged: 2025-08-28 14:57:14 UTC; miquel
 Author: Miquel De Cáceres [aut, cre],
-  Aitor Améztegui [aut] (<https://orcid.org/0000-0003-2006-1559>),
-  María González [aut] (<https://orcid.org/0000-0002-2227-8404>),
+  Aitor Améztegui [aut] (ORCID: <https://orcid.org/0000-0003-2006-1559>),
+  María González [aut] (ORCID: <https://orcid.org/0000-0002-2227-8404>),
   Núria Aquilué [aut],
   Daniel Caviedes-Voullième [aut],
   Mario Morales-Hernández [aut],
   Mario Beltrán [ctb],
-  Rodrigo Balaguer-Romano [ctb] (<https://orcid.org/0000-0003-2808-6777>),
-  Roberto Molowny-Horas [ctb] (<https://orcid.org/0000-0003-2626-6379>)
+  Rodrigo Balaguer-Romano [ctb] (ORCID:
+    <https://orcid.org/0000-0003-2808-6777>),
+  Roberto Molowny-Horas [ctb] (ORCID:
+    <https://orcid.org/0000-0003-2626-6379>)
 Maintainer: Miquel De Cáceres <miquelcaceres@gmail.com>
 Repository: CRAN
-Date/Publication: 2025-04-23 14:00:02 UTC
+Date/Publication: 2025-08-28 16:00:02 UTC

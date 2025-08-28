@@ -14,7 +14,9 @@
 #' @param SpParams A data frame with species parameters (see \code{\link[medfate]{SpParamsMED}}).
 #' @param local_control A list of control parameters (see \code{\link[medfate]{defaultControl}}).
 #' @param model A string to indicate the model, either \code{"spwb"} or \code{"growth"}.
-#' @param simplify Boolean flag to simplify forest to the tree and shrub cohorts with largest leaf area index. The leaf area index of the whole tree (respectively, shrub) layer will be attributed to the selected cohort.
+#' @param merge_trees A logical flag to simplify tree cohorts by merging tree records in DBH classes (see \code{\link[medfate]{forest_mergeTrees}}).
+#' @param merge_shrubs A logical flag to simplify shrub cohorts by merging shrub records in height classes (see \code{\link[medfate]{forest_mergeShrubs}}).
+#' @param reduce_to_dominant Boolean flag to simplify forest to the tree and shrub cohorts with largest leaf area index. The leaf area index of the whole tree (respectively, shrub) layer will be attributed to the selected cohort.
 #'                 See function \code{\link[medfate]{forest_reduceToDominant}}. 
 #' @param replace Boolean flag to replace existing initialized states
 #' @param progress Boolean flag to display progress information.
@@ -26,7 +28,7 @@
 #' Initialization is normally dealt automatically when calling simulation functions \code{\link{spwb_spatial}},  \code{\link{growth_spatial}},
 #' \code{\link{spwb_spatial_day}} or \code{\link{growth_spatial_day}}. However, function \code{initialize_landscape}  allows separating initialization from model simulations.
 #' 
-#' Option \code{simplify} has been implemented to allow simplification of forests to tree/shrub dominant cohorts during watershed simulations 
+#' Options \code{merge_shrubs}, \code{merge_trees} and \code{reduce_to_dominant} have been implemented to allow simplification of forests during watershed simulations 
 #' where focus is on runoff (e.g. calibration of watershed parameters or burnin periods). Elements identified as \code{result_cell} will not be simplified.
 #' 
 #' @author Miquel De \enc{Cáceres}{Caceres} Ainsa, CREAF
@@ -58,14 +60,16 @@
 #' @name initialize_landscape
 #' @export
 initialize_landscape<- function(x, SpParams, local_control, model = "spwb", 
-                                simplify = FALSE, 
+                                merge_trees = FALSE,
+                                merge_shrubs = FALSE,
+                                reduce_to_dominant = FALSE, 
                                 replace = FALSE, progress = TRUE) {
   match.arg(model, c("spwb", "growth"))
   if(!inherits(x, "sf")) cli::cli_abort("'x' has to be an object of class 'sf'.")
   if(!("forest" %in% names(x))) cli::cli_abort("Column 'forest' must be defined.")
   if(!("soil" %in% names(x))) cli::cli_abort("Column 'soil' must be defined.")
-  forestlist = x$forest
-  soillist  = x$soil
+  forestlist <- x$forest
+  soillist <- x$soil
   # Set local control verbose to FALSE
   local_control$verbose = FALSE
   n <- length(forestlist)
@@ -96,10 +100,10 @@ initialize_landscape<- function(x, SpParams, local_control, model = "spwb",
     init<-rep(FALSE, n)
     for(i in 1:n) {
       if(landcover[i] == "wildland") {
-        f = forestlist[[i]]
-        s = soillist[[i]]
+        f <- forestlist[[i]]
+        s <- soillist[[i]]
         if(inherits(f, "forest") && inherits(s, c("soil", "data.frame"))) {
-          init[i] = TRUE
+          init[i] <- TRUE
           x_i = xlist[[i]]
           if(!replace) {
             if(inherits(x_i,"spwbInput") && model=="spwb") {
@@ -108,17 +112,17 @@ initialize_landscape<- function(x, SpParams, local_control, model = "spwb",
               transp_mode[i] <- x_i$control$transpirationMode
             }
             if(inherits(x_i,"growthInput") && model=="growth") {
-              init[i] = FALSE
+              init[i] <- FALSE
               soil_domains[i] <- x_i$control$soilDomains
               transp_mode[i] <- x_i$control$transpirationMode
             }
           }
         }
       } else if(landcover[i] == "agriculture") {
-        s = soillist[[i]]
+        s <- soillist[[i]]
         if(inherits(s, c("soil","data.frame"))) {
           init[i] <- TRUE
-          x_i = xlist[[i]]
+          x_i <- xlist[[i]]
           if(!replace) {
             if(inherits(x_i,"aspwbInput")) {
               init[i] = FALSE
@@ -154,15 +158,21 @@ initialize_landscape<- function(x, SpParams, local_control, model = "spwb",
         }
         
         if(landcover[i] == "wildland") {
-          f = forestlist[[i]]
+          f <- forestlist[[i]]
           if(inherits(f, "forest") && inherits(s, "soil")) {
-            if(simplify && (!result_cell[i])) {
-              f = medfate::forest_reduceToDominant(f, SpParams)
+            if(merge_trees && (!result_cell[i]))  {
+              f <- medfate::forest_mergeTrees(f)
+            }
+            if(merge_shrubs && (!result_cell[i]))  {
+              f <- medfate::forest_mergeShrubs(f)
+            }
+            if(reduce_to_dominant && (!result_cell[i])) {
+              f <- medfate::forest_reduceToDominant(f, SpParams)
             }
             if(model=="spwb") {
-              xlist[[i]] = medfate::spwbInput(f, s, SpParams, local_control_i)
+              xlist[[i]] <- medfate::spwbInput(f, s, SpParams, local_control_i)
             } else if(model=="growth") {
-              xlist[[i]] = medfate::growthInput(f, s, SpParams, local_control_i)
+              xlist[[i]] <- medfate::growthInput(f, s, SpParams, local_control_i)
             }
             soil_domains[i] <- local_control_i$soilDomains
             transp_mode[i] <- local_control_i$transpirationMode
