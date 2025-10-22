@@ -24,6 +24,20 @@ interpolator <- meteoland::with_meteo(meteoland_meteo_example, verbose = FALSE) 
   meteoland::create_meteo_interpolator(params = defaultInterpolationParams(), verbose = FALSE)
 
 
+yws_agric <- example_watershed
+yws_agric$forest[yws_agric$land_cover_type=="wildland"] <- list(NULL)
+yws_agric$land_cover_type[yws_agric$land_cover_type=="wildland"] <- "agriculture"
+yws_agric$crop_factor[yws_agric$land_cover_type=="agriculture"] <- 0.75
+
+yws_rock <- example_watershed
+yws_rock$forest[yws_rock$land_cover_type=="wildland"] <- list(NULL)
+yws_rock$forest[yws_rock$land_cover_type=="agriculture"] <- list(NULL)
+yws_rock$soil[yws_rock$land_cover_type=="wildland"] <- list(NULL)
+yws_rock$soil[yws_rock$land_cover_type=="agriculture"] <- list(NULL)
+yws_rock$land_cover_type[yws_rock$land_cover_type=="wildland"] <- "rock"
+yws_rock$land_cover_type[yws_rock$land_cover_type=="agriculture"] <- "rock"
+
+
 data("SpParamsMED")
 dates = seq(as.Date("2001-03-01"), as.Date("2001-03-01"), by="day")
 
@@ -37,16 +51,40 @@ test_that("Can simulate three days over landscape and watershed-level plots can 
                     SpParams = SpParamsMED, progress = FALSE)
   expect_s3_class(s1, "spwb_land")
   expect_s3_class(g1, "growth_land")
-  expect_s3_class(plot(s1, "Hydro"), "ggplot")
-  expect_s3_class(plot(s1, "PET"), "ggplot")
-  expect_s3_class(plot(s1, "Evapotranspiration"), "ggplot")
-  expect_s3_class(plot(s1, "Export"), "ggplot")
-  expect_s3_class(plot(g1, "Hydro"), "ggplot")
-  expect_s3_class(plot(g1, "PET"), "ggplot")
-  expect_s3_class(plot(g1, "Evapotranspiration"), "ggplot")
-  expect_s3_class(plot(g1, "Export"), "ggplot")
+  types <- medfateland:::.getWatershedWaterBalancePlotTypes()
+  for(type in types) {
+    expect_s3_class(plot(s1, type), "ggplot")
+    expect_s3_class(plot(g1, type), "ggplot")
+  }
 })
 
+test_that("Can simulate three days over agricultural landscape and watershed-level plots can be obtained",{
+  s1 <- spwb_land(r, yws_agric[1:10,], meteo = examplemeteo, dates = dates, summary_frequency = "month", 
+                  SpParams = SpParamsMED, progress = FALSE)
+  g1 <- growth_land(r, yws_agric[1:10,], meteo = examplemeteo, dates = dates, summary_frequency = "month", 
+                    SpParams = SpParamsMED, progress = FALSE)
+  expect_s3_class(s1, "spwb_land")
+  expect_s3_class(g1, "growth_land")
+  types <- medfateland:::.getWatershedWaterBalancePlotTypes()
+  for(type in types) {
+    expect_s3_class(plot(s1, type), "ggplot")
+    expect_s3_class(plot(g1, type), "ggplot")
+  }
+})
+
+test_that("Can simulate three days over rocky landscape and watershed-level plots can be obtained",{
+  s1 <- spwb_land(r, yws_rock[1:10,], meteo = examplemeteo, dates = dates, summary_frequency = "month", 
+                  SpParams = SpParamsMED, progress = FALSE)
+  g1 <- growth_land(r, yws_rock[1:10,], meteo = examplemeteo, dates = dates, summary_frequency = "month", 
+                    SpParams = SpParamsMED, progress = FALSE)
+  expect_s3_class(s1, "spwb_land")
+  expect_s3_class(g1, "growth_land")
+  types <- medfateland:::.getWatershedWaterBalancePlotTypes()
+  for(type in types) {
+    expect_s3_class(plot(s1, type), "ggplot")
+    expect_s3_class(plot(g1, type), "ggplot")
+  }
+})
 test_that("Can simulate three days over landscape with dates in column",{
   expect_s3_class(spwb_land(r, yws_swpb[1:10,], meteo = examplemeteo2, dates = dates, summary_frequency = "month", 
                             SpParams = SpParamsMED, progress = FALSE), "spwb_land")
@@ -54,6 +92,21 @@ test_that("Can simulate three days over landscape with dates in column",{
                               SpParams = SpParamsMED, progress = FALSE), "growth_land")
 })
 
+test_that("Can simulate three days with additional summaries",{
+  local_control = defaultControl()
+  local_control$fireHazardResults = TRUE
+  yws_swpb_fh <- initialize_landscape(example_watershed, SpParams = SpParamsMED, local_control = local_control,
+                                   model = "spwb", progress = FALSE)
+  yws_growth_fh <- initialize_landscape(example_watershed, SpParams = SpParamsMED, local_control = local_control,
+                                     model = "growth", progress = FALSE)
+  
+  expect_s3_class(spwb_land(r, yws_swpb_fh[1:10,], meteo = examplemeteo2, dates = dates, summary_frequency = "month", 
+                            summary_blocks = c("FireHazard", "Stand","WaterBalance"),
+                            SpParams = SpParamsMED, progress = FALSE), "spwb_land")
+  expect_s3_class(growth_land(r, yws_growth_fh[1:10,], meteo = examplemeteo2, dates = dates, summary_frequency = "month", 
+                              summary_blocks = c("Stand","WaterBalance", "CarbonBalance"),
+                              SpParams = SpParamsMED, progress = FALSE), "growth_land") # FireHazard does not work with medfate 4.8.3
+})
 
 yws = example_watershed
 yws$crop_factor = NA

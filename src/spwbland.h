@@ -35,6 +35,7 @@ const int WBCOM_BaseflowBalance = 25;
 const int WBCOM_ChannelExport = 26;
 const int WBCOM_WatershedExport = 27;
 const int WBCOM_Interception = 28;
+const int WBCOM_NegativeAquiferCorrection = 29;
 
 const int STCOM_LAI = 0;
 const int STCOM_LAIherb = 1;
@@ -44,6 +45,23 @@ const int STCOM_LAIdead = 4;
 const int STCOM_Cm = 5;
 const int STCOM_LgroundPAR = 6;
 const int STCOM_LgroundSWR = 7;
+
+const int FHCOM_Loading_overstory = 0;
+const int FHCOM_Loading_understory = 1;
+const int FHCOM_CFMC_overstory = 2;
+const int FHCOM_CFMC_understory = 3;
+const int FHCOM_DFMC = 4;
+const int FHCOM_ROS_surface = 5;
+const int FHCOM_I_b_surface = 6;
+const int FHCOM_t_r_surface = 7;
+const int FHCOM_FL_surface = 8;
+const int FHCOM_Ic_ratio = 9;
+const int FHCOM_ROS_crown = 10;
+const int FHCOM_I_b_crown = 11;
+const int FHCOM_t_r_crown = 12;
+const int FHCOM_FL_crown = 13;
+const int FHCOM_SFP = 14;
+const int FHCOM_CFP = 15;
 
 const int CBCOM_GrossPrimaryProduction = 0;
 const int CBCOM_MaintenanceRespiration = 1;
@@ -60,6 +78,6 @@ void copySnowpackToSoil(List y);
 void copySnowpackFromSoil(List y);
 void resetWaterBalanceDayOutput(DataFrame outWB);
 List createDayOutput(int nX, 
-                     bool standSummary, bool carbonBalanceSummary, bool biomassBalanceSummary);
+                     bool standSummary, bool fireHazardSummary, bool carbonBalanceSummary, bool biomassBalanceSummary);
 List fcpp_landunit_day(List xi, String model, CharacterVector date, List internalCommunication, 
-                       bool standSummary, bool carbonBalanceSummary, bool biomassBalanceSummary);
+                       bool standSummary, bool fireHazardSummary, bool carbonBalanceSummary, bool biomassBalanceSummary);

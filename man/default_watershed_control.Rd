@@ -17,11 +17,14 @@ A list with the following items:
 \item{\code{tetis_parameters}: A list of TETIS parameters with the following elements:
 \itemize{
 \item{\code{R_localflow [= 1.0]}: Correction factor for soil hydraulic saturated conductivity (local vertical flows).}
+\item{\code{interflow [= TRUE]}: A boolean flag to include interflow.}
 \item{\code{R_interflow [= 50.0]}: Correction factor for soil hydraulic saturated conductivity (subsurface flow between grid cells).}
-\item{\code{R_baseflow [= 5.0]}: Correction factor for bedrock hydraulic conductivity (groundwaterflow between grid cells).}
 \item{\code{n_interflow [= 1.0]}: Exponent for the determination of interflow.}
+\item{\code{baseflow [= TRUE]}: A boolean flag to include baseflow.}
+\item{\code{R_baseflow [= 5.0]}: Correction factor for bedrock hydraulic conductivity (groundwaterflow between grid cells).}
 \item{\code{n_baseflow [= 1.0]}: Exponent for the determination of baseflow.}
-\item{\code{num_daily_substeps [= 4]}: Number of daily sub-steps for interflow calculations.}
+\item{\code{free_drainage_outlets [= TRUE]}: A boolean flag to prevent water table effects into local soil water balance of outlet/channel cells (included for numerical stability).}
+\item{\code{num_daily_substeps [= 1]}: Number of daily sub-steps for interflow and baseflow calculations.}
 \item{\code{subwatersheds [= FALSE]}: A boolean flag to define watershed subunits.}
 \item{\code{max_overlap [= 0.2]}: Maximum proportion of overlapping cells for watershed subunits to be considered independent. Lower values will normally produce larger subunits.}
 \item{\code{rock_max_infiltration [= 10]}: Maximum infiltration rate (mm·day-1) for rock cells.}

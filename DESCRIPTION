@@ -1,8 +1,8 @@
 Package: medfateland
 Type: Package
 Title: Mediterranean Landscape Simulation
-Version: 2.7.0
-Date: 2025-08-28
+Version: 2.8.1
+Date: 2025-10-22
 Authors@R: c(
 	person('Miquel', 'De Cáceres', role=c('aut','cre'),
 	email='miquelcaceres@gmail.com'),
@@ -20,7 +20,7 @@ URL: https://emf-creaf.github.io/medfateland/,
         https://github.com/emf-creaf/medfateland
 BugReports: https://github.com/emf-creaf/medfateland/issues
 LazyLoad: yes
-Depends: R (>= 4.1.0), medfate (>= 4.8.1)
+Depends: R (>= 4.1.0), medfate (>= 4.8.3)
 Imports: cli, ggplot2, dplyr, httr, jsonlite, lifecycle, methods,
         meteoland (>= 2.0.2), rlang, Rcpp (>= 0.12.12), parallel, sf,
         shiny, stars, terra, tidyterra, tidyr, tibble, stats
@@ -30,8 +30,8 @@ Encoding: UTF-8
 NeedsCompilation: yes
 LazyData: true
 Config/testthat/edition: 3
-RoxygenNote: 7.3.2
-Packaged: 2025-08-28 14:57:14 UTC; miquel
+RoxygenNote: 7.3.3
+Packaged: 2025-10-22 10:29:53 UTC; miquel
 Author: Miquel De Cáceres [aut, cre],
   Aitor Améztegui [aut] (ORCID: <https://orcid.org/0000-0003-2006-1559>),
   María González [aut] (ORCID: <https://orcid.org/0000-0002-2227-8404>),
@@ -45,4 +45,4 @@ Author: Miquel De Cáceres [aut, cre],
     <https://orcid.org/0000-0003-2626-6379>)
 Maintainer: Miquel De Cáceres <miquelcaceres@gmail.com>
 Repository: CRAN
-Date/Publication: 2025-08-28 16:00:02 UTC
+Date/Publication: 2025-10-22 11:00:02 UTC
