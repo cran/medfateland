@@ -73,6 +73,7 @@ initialize_landscape<- function(x, SpParams, local_control, model = "spwb",
   # Set local control verbose to FALSE
   local_control$verbose = FALSE
   n <- length(forestlist)
+  medfate_ver <- as.character(packageVersion("medfate"))
   if("state" %in% names(x)) {
     xlist  = x$state
   } else {
@@ -87,6 +88,11 @@ initialize_landscape<- function(x, SpParams, local_control, model = "spwb",
     cropfactor <- x$crop_factor
   } else {
     cropfactor <- rep(NA, n)
+  }
+  if("snowpack" %in% names(x)) {
+    snowpack <- x$snowpack
+  } else {
+    snowpack <- rep(NA, n)
   }
   if("result_cell" %in% names(x)) {
     result_cell <- x$result_cell
@@ -108,11 +114,29 @@ initialize_landscape<- function(x, SpParams, local_control, model = "spwb",
           if(!replace) {
             if(inherits(x_i,"spwbInput") && model=="spwb") {
               init[i] = FALSE
+              if(compareVersion(medfate_ver, "4.8.5") >= 0) {
+                if("version" %in% names(x_i)) {
+                  if(compareVersion(x_i[["version"]],medfate_ver)<0) medfate:::.spwbInputVersionUpdate(x_i)
+                } else {
+                  medfate:::.spwbInputVersionUpdate(x_i)                
+                  x_i[["version"]] <- medfate_ver
+                  xlist[[i]] <- x_i
+                }
+              }
               soil_domains[i] <- x_i$control$soilDomains
               transp_mode[i] <- x_i$control$transpirationMode
             }
             if(inherits(x_i,"growthInput") && model=="growth") {
               init[i] <- FALSE
+              if(compareVersion(medfate_ver, "4.8.5") >= 0) {
+                if("version" %in% names(x_i)) {
+                  if(compareVersion(x_i[["version"]],medfate_ver)<0) medfate:::.growthInputVersionUpdate(x_i)
+                } else {
+                  medfate:::.growthInputVersionUpdate(x_i)
+                  x_i[["version"]] <- medfate_ver
+                  xlist[[i]] <- x_i
+                }
+              }
               soil_domains[i] <- x_i$control$soilDomains
               transp_mode[i] <- x_i$control$transpirationMode
             }
@@ -131,7 +155,13 @@ initialize_landscape<- function(x, SpParams, local_control, model = "spwb",
             }
           }
         }
-      }
+      } else if(landcover[i] %in% c("rock", "artificial", "water")) {
+        init[i] <- TRUE
+        x_i <- xlist[[i]]
+        if(inherits(x_i,"nswbInput")) {
+          init[i] = FALSE
+        }
+      } 
     }
     w_init = which(init)
     if(length(w_init)>0) {
@@ -181,6 +211,8 @@ initialize_landscape<- function(x, SpParams, local_control, model = "spwb",
           xlist[[i]] <- medfate::aspwbInput(crop_factor = cropfactor[i], control = local_control_i, soil = s)
           soil_domains[i] <- local_control_i$soilDomains
           transp_mode[i] <- local_control_i$transpirationMode
+        } else if(landcover[i] %in% c("rock", "artificial", "water")) {
+          xlist[[i]] <- medfate:::.nswbInput(landcover[i], snowpack[i])
         }
         if(progress) cli::cli_progress_update()
       }

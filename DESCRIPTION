@@ -1,8 +1,8 @@
 Package: medfateland
 Type: Package
 Title: Mediterranean Landscape Simulation
-Version: 2.8.1
-Date: 2025-10-22
+Version: 3.0.0
+Date: 2026-05-05
 Authors@R: c(
 	person('Miquel', 'De Cáceres', role=c('aut','cre'),
 	email='miquelcaceres@gmail.com'),
@@ -20,18 +20,18 @@ URL: https://emf-creaf.github.io/medfateland/,
         https://github.com/emf-creaf/medfateland
 BugReports: https://github.com/emf-creaf/medfateland/issues
 LazyLoad: yes
-Depends: R (>= 4.1.0), medfate (>= 4.8.3)
+Depends: R (>= 4.1.0), medfate (>= 5.0.0)
 Imports: cli, ggplot2, dplyr, httr, jsonlite, lifecycle, methods,
-        meteoland (>= 2.0.2), rlang, Rcpp (>= 0.12.12), parallel, sf,
+        meteoland (>= 2.2.6), rlang, Rcpp (>= 0.12.12), parallel, sf,
         shiny, stars, terra, tidyterra, tidyr, tibble, stats
 Suggests: knitr, rmarkdown, testthat (>= 3.0.0)
-LinkingTo: Rcpp, meteoland, medfate
+LinkingTo: Rcpp, RcppArmadillo, RcppParallel, meteoland, medfate
 Encoding: UTF-8
 NeedsCompilation: yes
 LazyData: true
 Config/testthat/edition: 3
-RoxygenNote: 7.3.3
-Packaged: 2025-10-22 10:29:53 UTC; miquel
+Config/roxygen2/version: 8.0.0
+Packaged: 2026-05-06 16:26:09 UTC; miquel
 Author: Miquel De Cáceres [aut, cre],
   Aitor Améztegui [aut] (ORCID: <https://orcid.org/0000-0003-2006-1559>),
   María González [aut] (ORCID: <https://orcid.org/0000-0002-2227-8404>),
@@ -45,4 +45,4 @@ Author: Miquel De Cáceres [aut, cre],
     <https://orcid.org/0000-0003-2626-6379>)
 Maintainer: Miquel De Cáceres <miquelcaceres@gmail.com>
 Repository: CRAN
-Date/Publication: 2025-10-22 11:00:02 UTC
+Date/Publication: 2026-05-06 17:00:02 UTC

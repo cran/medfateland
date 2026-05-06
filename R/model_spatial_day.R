@@ -25,23 +25,39 @@
   
   if(model=="spwb") {
     if(inherits(xi$x, "spwbInput")){
-      res<-medfate::spwb_day(xi$x, date, meteovec,
+      res <- tryCatch({
+        medfate::spwb_day(xi$x, date, meteovec,
                              latitude = xi$latitude, elevation = xi$elevation, slope = xi$slope, aspect = xi$aspect, 
                              modifyInput = TRUE)
+      }, error = function(e) {
+        simpleError(e$message,"spwb_day")
+      })
     } else if(inherits(xi$x, "aspwbInput")) {
-      res <- medfate::aspwb_day(xi$x, date, meteovec,
+      res <- tryCatch({
+        medfate::aspwb_day(xi$x, date, meteovec,
                        latitude = xi$latitude, elevation = xi$elevation, slope = xi$slope, aspect = xi$aspect, 
                        modifyInput = TRUE)
+      }, error = function(e) {
+        simpleError(e$message,"aspwb_day")
+      })
     }
   } else if(model=="growth") {
     if(inherits(xi$x, "growthInput")) {
-      res<-medfate::growth_day(xi$x, date, meteovec,
+      res<-tryCatch({
+        medfate::growth_day(xi$x, date, meteovec,
                                latitude = xi$latitude, elevation = xi$elevation, slope = xi$slope, aspect = xi$aspect, 
                                modifyInput = TRUE)
+      }, error = function(e) {
+        simpleError(e$message,"growth_day")
+      })
     } else if(inherits(xi$x, "aspwbInput")) {
-      res <- medfate::aspwb_day(xi$x, date, meteovec,
+      res <- tryCatch({
+        medfate::aspwb_day(xi$x, date, meteovec,
                         latitude = xi$latitude, elevation = xi$elevation, slope = xi$slope, aspect = xi$aspect, 
                         modifyInput = TRUE)
+      }, error = function(e) {
+        simpleError(e$message,"aspwb_day")
+      })
       
     }
   } 
@@ -66,6 +82,7 @@
   local_control$verbose <- FALSE
   
   n <- nrow(y)
+  medfate_ver <- as.character(packageVersion("medfate"))
   forestlist <- y$forest
   soillist  <- y$soil
   if("land_cover_type" %in% names(y)) {
@@ -109,8 +126,30 @@
         if(inherits(f, "forest") && inherits(s, c("soil","data.frame"))) {
           init[i] <- TRUE
           x <- xlist[[i]]
-          if(inherits(x,"spwbInput") && model=="spwb") init[i] = FALSE
-          if(inherits(x,"growthInput") && model=="growth") init[i] = FALSE
+          if(inherits(x,"spwbInput") && model=="spwb") {
+            init[i] = FALSE
+            if(compareVersion(medfate_ver, "4.8.5") >= 0) {
+              if("version" %in% names(x)) {
+                if(compareVersion(x[["version"]],medfate_ver)<0) medfate:::.spwbInputVersionUpdate(x)
+              } else {
+                medfate:::.spwbInputVersionUpdate(x)                
+                x[["version"]] <- medfate_ver
+                xlist[[i]] <- x
+              }
+            }
+          }
+          if(inherits(x,"growthInput") && model=="growth") {
+            init[i] = FALSE
+            if(compareVersion(medfate_ver, "4.8.5") >= 0) {
+              if("version" %in% names(x)) {
+                if(compareVersion(x[["version"]],medfate_ver)<0) medfate:::.spwbInputVersionUpdate(x)
+              } else {
+                medfate:::.spwbInputVersionUpdate(x)                
+                x[["version"]] <- medfate_ver
+                xlist[[i]] <- x
+              }
+            }
+          }
         }
       } else if(landcover[i] == "agriculture") {
         if(inherits(soillist[[i]], c("soil","data.frame"))) {
@@ -206,6 +245,13 @@
   res$id <- y$id
   res$state <- xlist
   res$result <- resultlist
+  errors <- sapply(res$result, function(x){inherits(x, "error")})
+  if(sum(errors)>0) {
+    cli::cli_alert_warning(paste0("Simulation errors occurred in ", sum(errors), " out of ",n ," stands. Check error messages in 'result'"))
+  } else {
+    if(progress) cli::cli_alert_success(paste0("No simulation errors detected"))
+  }
+  
   return(sf::st_as_sf(tibble::as_tibble(res)))
 }
 
